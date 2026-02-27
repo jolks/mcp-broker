@@ -1,0 +1,88 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build & Run
+
+```bash
+pnpm run build          # TypeScript → dist/
+pnpm run dev            # tsc --watch
+pnpm start serve          # Start MCP server (stdio), uses local .mcp-broker/
+pnpm start setup [path]   # Import servers, health-check, configure AI tools
+pnpm start list           # Show registered servers
+pnpm start refresh [name] # Re-harvest tools
+pnpm start restore <path> # Restore config from backup
+```
+
+The `start` script sets `MCP_BROKER_HOME=./.mcp-broker` so local dev uses a project-local directory instead of `~/.mcp-broker`.
+
+```bash
+pnpm test               # Run tests (vitest)
+pnpm run test:watch     # Watch mode
+pnpm run test:coverage  # Run tests with v8 coverage report
+pnpm run test:e2e       # E2E tests via claude -p (costs tokens, see below)
+pnpm run lint           # Run ESLint
+pnpm run lint:fix       # Run ESLint with auto-fix
+```
+
+## Architecture
+
+mcp-broker is an MCP server that acts as a gateway to many downstream MCP servers. Instead of configuring dozens of MCP servers (flooding the LLM context with hundreds of tool schemas), you configure one: mcp-broker. It exposes 8 fixed meta-tools. The LLM uses `search_tools` to discover tools via FTS5 full-text search, then uses `call_tools` to invoke them.
+
+The LLM uses `search_tools` to discover tools (returns names, descriptions, and input schemas), then uses `call_tools` to invoke them by `server_name` and `tool_name`. `call_tools` accepts an array of invocations and executes them in parallel.
+
+### Data flow
+
+```
+LLM → search_tools("github issue") → FTS5 lookup → returns schemas
+LLM → call_tools(invocations: [{server_name: "github", tool_name: "create_issue", arguments: {...}}])
+    → broker → pool.getClient("github") → client.callTool("create_issue", {...})
+    → result passed through to LLM
+```
+
+### Module responsibilities
+
+- **index.ts** — CLI entry point (commander). Creates Store/Pool/Registry/Broker, wires them together.
+- **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 8 meta-tools. `search_tools` returns schemas; `call_tools` invokes discovered tools via the broker.
+- **broker.ts** — Orchestration layer. Owns search, tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
+- **store.ts** — SQLite + FTS5 via better-sqlite3. Tables: `servers`, `tools`, `tools_fts` (virtual). DB at `$MCP_BROKER_HOME/broker.db`. Porter stemming for search. Acts as a rebuildable index.
+- **pool.ts** — Eager connection manager. Connects to all servers on startup via `StdioClientTransport`. Auto-reconnects on disconnect. `Map<serverName, {client, transport}>`.
+- **harvester.ts** — One-shot tool discovery. Spawns a server, calls `tools/list` with pagination, collects schemas, shuts down. 30s timeout.
+- **registry.ts** — Manages `servers.json` (the source of truth for server definitions). Pure standard MCP config format. CRUD operations: addServer, removeServer, listEntries, importServers.
+- **config.ts** — App-wide defaults: identity (`VERSION`, `SERVER_NAME`), path helpers (`brokerHome()`, `dbPath()`, `registryPath()`, `backupsDir()`), permissions (`FILE_PERMISSION`), timeouts, search constants, and utilities (`buildEnv`, `raceTimeout`). Merged from former `paths.ts` and `utils.ts`.
+- **client-config.ts** — Reads/writes MCP client config JSON files (Cursor, Claude Desktop format). Handles backup/restore. Cross-client helpers: `listKnownConfigPaths()`, `addBrokerToConfig()`, `hasBrokerEntry()`.
+- **setup-rewrite.ts** — Config rewrite pick-list logic for `setup` command. `parseSelection()` parses user input into indices. `promptAndRewriteConfigs()` displays candidates, prompts user, and rewrites selected configs. Uses `PromptIO` interface for testability.
+- **logger.ts** — stderr-only (stdout is reserved for MCP stdio protocol).
+
+### MCP SDK import paths (ESM)
+
+All imports require `.js` extension even in TypeScript:
+- `@modelcontextprotocol/sdk/server/index.js` — `Server`
+- `@modelcontextprotocol/sdk/server/stdio.js` — `StdioServerTransport`
+- `@modelcontextprotocol/sdk/client/index.js` — `Client`
+- `@modelcontextprotocol/sdk/client/stdio.js` — `StdioClientTransport`
+- `@modelcontextprotocol/sdk/types.js` — schemas and types (`ListToolsRequestSchema`, `CallToolRequestSchema`, `Tool`, `CallToolResult`, `McpError`, `ErrorCode`)
+
+### Key constraints
+
+- **`servers.json` is source of truth** — `$MCP_BROKER_HOME/servers.json` is the canonical server registry (pure standard MCP config format). SQLite is a rebuildable index. If the DB is deleted, it is rebuilt from `servers.json` on startup.
+- **`MCP_BROKER_HOME` env var** — overrides the base directory (default `~/.mcp-broker`). All paths are derived from it: `broker.db`, `servers.json`, `backups/`. Used by tests to isolate from `~/.mcp-broker`.
+- **stdout is sacred in `serve`** — the `serve` command uses stdio transport, so all logging there must go to stderr (`logger.ts`). CLI commands (`setup`, `list`, `refresh`, `restore`) are normal terminal programs and use `console.log` for user-facing output freely.
+- **FTS5 query sanitization** — user queries are stripped of special characters and converted to prefix searches to prevent FTS5 injection.
+- **DB permissions** — `broker.db` is chmod 0600 because it may contain env vars with API keys.
+- **Registry permissions** — `servers.json` is chmod 0600 because it may contain env vars with API keys.
+- **Backup before rewrite** — the `setup` command always verifies backup size > 0 before overwriting the original config.
+- **Tool ID prefixing** — tools are stored with `server__tool` IDs via `prefixToolName()` in `store.ts`.
+
+### Running E2E tests
+
+E2E tests spawn `claude -p` as a subprocess, so they require:
+- The `claude` CLI installed and authenticated
+- Each run costs real API tokens (~$0.25 for the full suite)
+- If `ANTHROPIC_API_KEY` is set, `claude` will use it (and bill the API). To use your Claude Max/Pro subscription instead: `unset ANTHROPIC_API_KEY && pnpm run test:e2e`
+
+The `pnpm run test:e2e` script sets `RUN_E2E=1` automatically. Output may appear blank in some environments because vitest's stdio is captured; redirect to a file to see results:
+
+```bash
+pnpm run test:e2e > /tmp/e2e.txt 2>&1 && cat /tmp/e2e.txt
+```
