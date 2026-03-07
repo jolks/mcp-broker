@@ -129,7 +129,7 @@ Break-even is ~16 tools. Below that, direct configuration is simpler. See [Token
 
 ## Requirements
 
-- Node.js >= 18
+- Node.js >= 20
 - SQLite (bundled via better-sqlite3)
 
 ## Development

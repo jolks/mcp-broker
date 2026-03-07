@@ -28,7 +28,7 @@
   "license": "MIT",
   "packageManager": "pnpm@10.29.3",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
