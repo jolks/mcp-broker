@@ -35,7 +35,7 @@ npx mcp-broker list
 `setup` auto-detects your MCP config (Cursor, Claude Desktop, Windsurf, Claude Code), imports all servers into `~/.mcp-broker/servers.json`, and lets you pick exactly which configs to rewrite.
 
 ```
-$ mcp-broker setup
+$ npx mcp-broker setup
 
 Found config: Cursor — ~/.cursor/mcp.json (3 servers)
 
@@ -72,7 +72,7 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 ```
 
 **Typical workflow:**
-1. `mcp-broker setup` — imports servers from your config and configures all AI tools in one step
+1. `npx mcp-broker setup` — imports servers from your config and configures all AI tools in one step
 2. All clients now share the same MCP servers — add or remove once, applies everywhere
 
 ## Meta-Tools
