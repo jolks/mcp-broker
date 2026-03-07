@@ -1,9 +1,14 @@
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 // ── Identity ────────────────────────────────────────────
 
-export const VERSION = "0.1.0";
+const pkg = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf-8")
+) as { version: string };
+
+export const VERSION = pkg.version;
 export const SERVER_NAME = "mcp-broker";
 export const HARVESTER_NAME = "mcp-broker-harvester";
 

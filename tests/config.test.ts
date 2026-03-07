@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { brokerHome, dbPath, registryPath, backupsDir, buildEnv, raceTimeout } from "../src/config.js";
+import { VERSION, brokerHome, dbPath, registryPath, backupsDir, buildEnv, raceTimeout } from "../src/config.js";
 
 describe("config", () => {
   const originalEnv = process.env.MCP_BROKER_HOME;
@@ -12,6 +13,21 @@ describe("config", () => {
     } else {
       process.env.MCP_BROKER_HOME = originalEnv;
     }
+  });
+
+  // ── VERSION ────────────────────────────────────────
+
+  describe("VERSION", () => {
+    it("matches package.json version", () => {
+      const pkg = JSON.parse(
+        readFileSync(join(__dirname, "..", "package.json"), "utf-8")
+      ) as { version: string };
+      expect(VERSION).toBe(pkg.version);
+    });
+
+    it("is a valid semver string", () => {
+      expect(VERSION).toMatch(/^\d+\.\d+\.\d+/);
+    });
   });
 
   // ── brokerHome ──────────────────────────────────────

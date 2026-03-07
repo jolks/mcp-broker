@@ -7,6 +7,7 @@
     "mcp-broker": "./dist/index.js"
   },
   "main": "./dist/index.js",
+  "files": ["dist/"],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
