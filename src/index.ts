@@ -13,7 +13,7 @@ import { harvestTools } from "./harvester.js";
 import { existsSync } from "node:fs";
 import { createInterface, type Interface } from "node:readline";
 import { setLogLevel } from "./logger.js";
-import { VERSION } from "./config.js";
+import { VERSION, SERVER_NAME } from "./config.js";
 
 async function promptForConfigPath(rl: Interface): Promise<string> {
   const answer = await new Promise<string>((resolve) => {
@@ -93,7 +93,7 @@ program
         let serverCount = 0;
         try {
           const cfg = readConfig(resolvedPath);
-          serverCount = Object.keys(cfg.mcpServers ?? {}).filter((n) => n !== "mcp-broker").length;
+          serverCount = Object.keys(cfg.mcpServers ?? {}).filter((n) => n !== SERVER_NAME).length;
         } catch { /* ignore */ }
 
         console.log(`Found config: ${detected[0].clientName} — ${detected[0].path} (${serverCount} server${serverCount !== 1 ? "s" : ""})\n`);
@@ -103,7 +103,7 @@ program
           let serverCount = 0;
           try {
             const cfg = readConfig(detected[i].path);
-            serverCount = Object.keys(cfg.mcpServers ?? {}).filter((n) => n !== "mcp-broker").length;
+            serverCount = Object.keys(cfg.mcpServers ?? {}).filter((n) => n !== SERVER_NAME).length;
           } catch { /* ignore */ }
           console.log(`  ${i + 1}. ${detected[i].clientName} — ${detected[i].path} (${serverCount} server${serverCount !== 1 ? "s" : ""})`);
         }

@@ -238,6 +238,12 @@ export class Store {
     return terms.map((t) => `"${t}"*`).join(" ");
   }
 
+  // ── Transaction ──────────────────────────────────────────
+
+  runInTransaction(fn: () => void): void {
+    this.db.transaction(fn)();
+  }
+
   // ── Lifecycle ────────────────────────────────────────────
 
   close(): void {

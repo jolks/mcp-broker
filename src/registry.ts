@@ -9,17 +9,20 @@ export interface RegistryData {
 
 export class Registry {
   private filePath: string;
+  private cache: RegistryData | null = null;
 
   constructor(filePath?: string) {
     this.filePath = filePath ?? registryPath();
   }
 
   read(): RegistryData {
+    if (this.cache) return this.cache;
     if (!existsSync(this.filePath)) {
       return { mcpServers: {} };
     }
     const raw = readFileSync(this.filePath, "utf-8");
-    return JSON.parse(raw) as RegistryData;
+    this.cache = JSON.parse(raw) as RegistryData;
+    return this.cache;
   }
 
   addServer(name: string, entry: McpServerEntry): void {
@@ -51,6 +54,7 @@ export class Registry {
   }
 
   private write(data: RegistryData): void {
+    this.cache = data;
     mkdirSync(dirname(this.filePath), { recursive: true });
     writeFileSync(this.filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
     try {

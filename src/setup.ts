@@ -3,6 +3,7 @@ import { Registry } from "./registry.js";
 import { readConfig, backupConfig, rewriteConfigForBroker } from "./client-config.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
+import { SERVER_NAME, getErrorMessage } from "./config.js";
 
 export interface ServerSetupResult {
   name: string;
@@ -26,7 +27,7 @@ export async function setupFromConfig(
 ): Promise<SetupResult> {
   const config = readConfig(configPath);
   const entries = config.mcpServers ?? {};
-  const names = Object.keys(entries).filter((n) => n !== "mcp-broker");
+  const names = Object.keys(entries).filter((n) => n !== SERVER_NAME);
 
   if (names.length === 0) {
     return { configPath, backupPath: "", servers: [], rewritten: false };
@@ -41,8 +42,6 @@ export async function setupFromConfig(
   }
   registry.importServers(toImport);
 
-  const servers: ServerSetupResult[] = [];
-
   for (const name of names) {
     const entry = entries[name];
     store.upsertServer({
@@ -51,17 +50,26 @@ export async function setupFromConfig(
       args: entry.args ?? [],
       env: entry.env,
     });
+  }
 
-    try {
+  // Harvest tools in parallel
+  const results = await Promise.allSettled(
+    names.map(async (name) => {
+      const entry = entries[name];
       const tools = await harvestTools(entry.command, entry.args, entry.env);
       store.upsertTools(name, tools);
-      servers.push({ name, healthy: true, toolCount: tools.length });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.warn(`Failed to harvest tools for "${name}": ${message}`);
-      servers.push({ name, healthy: false, toolCount: 0, error: message });
+      return { name, toolCount: tools.length };
+    })
+  );
+
+  const servers: ServerSetupResult[] = results.map((r, i) => {
+    if (r.status === "fulfilled") {
+      return { name: r.value.name, healthy: true, toolCount: r.value.toolCount };
     }
-  }
+    const message = getErrorMessage(r.reason);
+    logger.warn(`Failed to harvest tools for "${names[i]}": ${message}`);
+    return { name: names[i], healthy: false, toolCount: 0, error: message };
+  });
 
   let rewritten = false;
   if (options.rewrite) {

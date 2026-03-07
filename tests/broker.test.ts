@@ -23,6 +23,7 @@ function makeStore(): Store {
     removeServer: vi.fn(),
     getToolCount: vi.fn(() => 0),
     getToolsForServer: vi.fn(() => []),
+    runInTransaction: vi.fn((fn: () => void) => fn()),
     close: vi.fn(),
   } as unknown as Store;
 }

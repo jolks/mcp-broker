@@ -42,6 +42,12 @@ export const MAX_RECONNECT_ATTEMPTS = 10;
 export const DEFAULT_SEARCH_LIMIT = 20;
 export const TOOL_PREFIX_SEPARATOR = "__";
 
+// ── Error handling ──────────────────────────────────────
+
+export function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // ── Utilities ───────────────────────────────────────────
 
 /**

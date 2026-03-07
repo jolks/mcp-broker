@@ -1,4 +1,5 @@
 import { backupConfig, rewriteConfigForBroker, addBrokerToConfig } from "./client-config.js";
+import { getErrorMessage } from "./config.js";
 
 export interface ConfigCandidate {
   clientName: string;
@@ -82,7 +83,7 @@ export async function promptAndRewriteConfigs(
       }
       configured.push(c.clientName);
     } catch (err) {
-      errors.push({ name: c.clientName, error: err instanceof Error ? err.message : String(err) });
+      errors.push({ name: c.clientName, error: getErrorMessage(err) });
     }
   }
 

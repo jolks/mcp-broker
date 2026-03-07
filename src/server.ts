@@ -9,7 +9,7 @@ import {
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Broker, type ToolInvocation, type ServerUpdate } from "./broker.js";
 import { logger } from "./logger.js";
-import { VERSION, SERVER_NAME, DEFAULT_SEARCH_LIMIT } from "./config.js";
+import { VERSION, SERVER_NAME, DEFAULT_SEARCH_LIMIT, getErrorMessage } from "./config.js";
 
 // ── Meta-tool definitions (always visible) ─────────────
 
@@ -295,7 +295,7 @@ export async function handleMetaTool(
           content: [
             {
               type: "text",
-              text: `Failed to add server "${serverName}": ${err instanceof Error ? err.message : String(err)}`,
+              text: `Failed to add server "${serverName}": ${getErrorMessage(err)}`,
             },
           ],
           isError: true,
@@ -399,7 +399,7 @@ export async function handleMetaTool(
           content: [
             {
               type: "text",
-              text: `Failed to update server "${serverName}": ${err instanceof Error ? err.message : String(err)}`,
+              text: `Failed to update server "${serverName}": ${getErrorMessage(err)}`,
             },
           ],
           isError: true,

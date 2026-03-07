@@ -3,7 +3,7 @@ import { join, dirname, resolve } from "node:path";
 import { homedir, platform } from "node:os";
 import { readdirSync } from "node:fs";
 import { logger } from "./logger.js";
-import { backupsDir } from "./config.js";
+import { backupsDir, SERVER_NAME } from "./config.js";
 
 export interface McpServerEntry {
   command: string;
@@ -48,7 +48,7 @@ export function buildBrokerEntry(): McpServerEntry {
       env: { MCP_BROKER_HOME: resolve(brokerHome) },
     };
   }
-  return { command: "npx", args: ["-y", "mcp-broker", "serve"] };
+  return { command: "npx", args: ["-y", SERVER_NAME, "serve"] };
 }
 
 export function rewriteConfigForBroker(configPath: string): void {
@@ -63,7 +63,7 @@ export function rewriteConfigForBroker(configPath: string): void {
   const newConfig: McpConfig = {
     ...existing,
     mcpServers: {
-      "mcp-broker": buildBrokerEntry(),
+      [SERVER_NAME]: buildBrokerEntry(),
     },
   };
 
@@ -141,10 +141,9 @@ export function listKnownConfigPaths(): Array<{ clientName: string; path: string
 }
 
 export function hasBrokerEntry(configPath: string): boolean {
-  if (!existsSync(configPath)) return false;
   try {
     const config = readConfig(configPath);
-    return "mcp-broker" in (config.mcpServers ?? {});
+    return SERVER_NAME in (config.mcpServers ?? {});
   } catch {
     return false;
   }
@@ -159,13 +158,13 @@ export function addBrokerToConfig(configPath: string): void {
   }
 
   const servers = existing.mcpServers ?? {};
-  if ("mcp-broker" in servers) return; // Already present
+  if (SERVER_NAME in servers) return; // Already present
 
   const newConfig: McpConfig = {
     ...existing,
     mcpServers: {
       ...servers,
-      "mcp-broker": buildBrokerEntry(),
+      [SERVER_NAME]: buildBrokerEntry(),
     },
   };
 
@@ -184,7 +183,7 @@ export function detectConfigFiles(): DetectedConfig[] {
     try {
       const config = readConfig(p);
       const servers = config.mcpServers ?? {};
-      const names = Object.keys(servers).filter((n) => n !== "mcp-broker");
+      const names = Object.keys(servers).filter((n) => n !== SERVER_NAME);
       if (names.length === 0) continue;
 
       results.push({ path: p, clientName: cfg.clientName });

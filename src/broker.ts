@@ -4,6 +4,8 @@ import { Pool } from "./pool.js";
 import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
+import { getErrorMessage } from "./config.js";
+import type { McpServerEntry } from "./client-config.js";
 
 export interface ToolInvocation {
   server_name: string;
@@ -97,7 +99,7 @@ export class Broker {
         content: [
           {
             type: "text",
-            text: `Error calling ${toolName}: ${err instanceof Error ? err.message : String(err)}`,
+            text: `Error calling ${toolName}: ${getErrorMessage(err)}`,
           },
         ],
         isError: true,
@@ -107,13 +109,13 @@ export class Broker {
 
   // ── Server Management ─────────────────────────────────
 
+  private toRegistryEntry(server: ServerRecord): McpServerEntry {
+    return { command: server.command, args: server.args, env: server.env };
+  }
+
   async addServer(server: ServerRecord): Promise<{ toolCount: number }> {
     // Write to registry first (source of truth)
-    this.registry.addServer(server.name, {
-      command: server.command,
-      args: server.args,
-      env: server.env,
-    });
+    this.registry.addServer(server.name, this.toRegistryEntry(server));
 
     this.store.upsertServer(server);
 
@@ -175,11 +177,7 @@ export class Broker {
     };
 
     // Write to registry (source of truth) and store
-    this.registry.addServer(name, {
-      command: merged.command,
-      args: merged.args,
-      env: merged.env,
-    });
+    this.registry.addServer(name, this.toRegistryEntry(merged));
     this.store.upsertServer(merged);
 
     // Disconnect, re-harvest, reconnect
@@ -233,32 +231,36 @@ export class Broker {
     const entries = this.registry.listEntries();
     const registryNames = new Set(entries.map((e) => e.name));
 
-    // Sync to SQLite: upsert all from registry, remove stale entries
-    for (const { name, entry } of entries) {
-      this.store.upsertServer({
-        name,
-        command: entry.command,
-        args: entry.args ?? [],
-        env: entry.env,
-      });
-    }
-
-    // Remove servers from SQLite that are no longer in registry
-    for (const s of storeServers) {
-      if (!registryNames.has(s.name)) {
-        this.store.removeServer(s.name);
+    // Sync to SQLite in a single transaction: upsert all from registry, remove stale entries
+    this.store.runInTransaction(() => {
+      for (const { name, entry } of entries) {
+        this.store.upsertServer({
+          name,
+          command: entry.command,
+          args: entry.args ?? [],
+          env: entry.env,
+        });
       }
-    }
-
-    // Harvest tools only if not already indexed
-    for (const { name, entry } of entries) {
-      if (this.store.getToolCount(name) === 0) {
-        try {
-          const tools = await harvestTools(entry.command, entry.args, entry.env);
-          this.store.upsertTools(name, tools);
-        } catch (err) {
-          logger.error(`Failed to harvest tools for "${name}" during startup: ${err}`);
+      for (const s of storeServers) {
+        if (!registryNames.has(s.name)) {
+          this.store.removeServer(s.name);
         }
+      }
+    });
+
+    // Harvest tools in parallel for servers not already indexed
+    const toHarvest = entries.filter(({ name }) => this.store.getToolCount(name) === 0);
+    const harvestResults = await Promise.allSettled(
+      toHarvest.map(async ({ name, entry }) => {
+        const tools = await harvestTools(entry.command, entry.args, entry.env);
+        return { name, tools };
+      })
+    );
+    for (const r of harvestResults) {
+      if (r.status === "fulfilled") {
+        this.store.upsertTools(r.value.name, r.value.tools);
+      } else {
+        logger.error(`Failed to harvest tools during startup: ${getErrorMessage(r.reason)}`);
       }
     }
 
