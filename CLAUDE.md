@@ -43,7 +43,7 @@ LLM → call_tools(invocations: [{server_name: "github", tool_name: "create_issu
 ### Module responsibilities
 
 - **index.ts** — CLI entry point (commander). Creates Store/Pool/Registry/Broker, wires them together.
-- **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 8 meta-tools. `search_tools` returns schemas; `call_tools` invokes discovered tools via the broker.
+- **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 8 meta-tools with annotations. `search_tools` description is dynamically built with actual server names and tool counts via `buildDynamicTools()`. Response text guides the LLM through a discovery cycle: search → list → get → search again.
 - **broker.ts** — Orchestration layer. Owns search, tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
 - **store.ts** — SQLite + FTS5 via better-sqlite3. Tables: `servers`, `tools`, `tools_fts` (virtual). DB at `$MCP_BROKER_HOME/broker.db`. Porter stemming for search. Acts as a rebuildable index.
 - **pool.ts** — Eager connection manager. Connects to all servers on startup via `StdioClientTransport`. Auto-reconnects on disconnect. `Map<serverName, {client, transport}>`.

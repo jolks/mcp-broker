@@ -79,12 +79,12 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 
 | Tool | Description |
 |---|---|
-| `search_tools` | Full-text search across all servers' tools. Returns names, descriptions, and input schemas. |
-| `call_tools` | Invoke one or more discovered tools. Multiple invocations execute in parallel. |
+| `search_tools` | Full-text search across all servers' tools. Returns names, descriptions, and input schemas. Description is dynamic — includes actual server names and total tool count so the LLM knows what's available. |
+| `call_tools` | Invoke one or more discovered tools via search_tools results. Multiple invocations execute in parallel. |
 | `add_mcp_server` | Register a new MCP server. Harvests and indexes its tools. |
 | `remove_mcp_server` | Remove a server and its indexed tools. |
-| `list_mcp_servers` | List all servers with connection status and tool counts. |
-| `get_mcp_server` | Get detailed info for a single server including config and tool listing. |
+| `list_mcp_servers` | List all servers with connection status and tool counts. Guides toward search_tools when search returns no results. |
+| `get_mcp_server` | Get detailed info for a server including all tool names. Guides toward search_tools for schema lookup. |
 | `update_mcp_server` | Update a server's config (command, args, env). Re-harvests and reconnects. |
 | `refresh_tools` | Re-harvest tools from one or all servers. |
 

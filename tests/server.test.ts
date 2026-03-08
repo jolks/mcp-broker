@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { handleMetaTool, META_TOOLS } from "../src/server.js";
+import { handleMetaTool, META_TOOLS, buildDynamicTools } from "../src/server.js";
 import type { Broker } from "../src/broker.js";
 
 function makeBroker(): Broker {
@@ -42,6 +42,69 @@ describe("META_TOOLS", () => {
       expect(tool.inputSchema.type).toBe("object");
     }
   });
+
+  it("all tools have annotations", () => {
+    for (const tool of META_TOOLS) {
+      expect(tool.annotations).toBeDefined();
+    }
+  });
+
+  it("search_tools and list/get are readOnlyHint", () => {
+    const readOnly = META_TOOLS.filter(
+      (t) => t.name === "search_tools" || t.name === "list_mcp_servers" || t.name === "get_mcp_server"
+    );
+    for (const tool of readOnly) {
+      expect(tool.annotations?.readOnlyHint).toBe(true);
+    }
+  });
+
+  it("remove_mcp_server is destructiveHint", () => {
+    const tool = META_TOOLS.find((t) => t.name === "remove_mcp_server")!;
+    expect(tool.annotations?.destructiveHint).toBe(true);
+  });
+
+  it("call_tools has openWorldHint", () => {
+    const tool = META_TOOLS.find((t) => t.name === "call_tools")!;
+    expect(tool.annotations?.openWorldHint).toBe(true);
+  });
+});
+
+describe("buildDynamicTools", () => {
+  it("returns static description when no servers", () => {
+    const tools = buildDynamicTools([]);
+    const search = tools.find((t) => t.name === "search_tools")!;
+    expect(search.description).toContain("ALWAYS call this FIRST before attempting any task");
+  });
+
+  it("returns dynamic description with server names and tool counts", () => {
+    const tools = buildDynamicTools([
+      { name: "github", toolCount: 5 },
+      { name: "filesystem", toolCount: 3 },
+    ]);
+    const search = tools.find((t) => t.name === "search_tools")!;
+    expect(search.description).toContain("8 tools");
+    expect(search.description).toContain("2 server(s)");
+    expect(search.description).toContain("github, filesystem");
+    expect(search.description).toContain("ALWAYS call this FIRST");
+  });
+
+  it("caps listed server names at 10", () => {
+    const servers = Array.from({ length: 12 }, (_, i) => ({
+      name: `server${i}`,
+      toolCount: 1,
+    }));
+    const tools = buildDynamicTools(servers);
+    const search = tools.find((t) => t.name === "search_tools")!;
+    expect(search.description).toContain("and 2 more");
+    expect(search.description).not.toContain("server10");
+    expect(search.description).not.toContain("server11");
+  });
+
+  it("does not modify non-search_tools descriptions", () => {
+    const tools = buildDynamicTools([{ name: "github", toolCount: 5 }]);
+    const callTools = tools.find((t) => t.name === "call_tools")!;
+    expect(callTools.description).toBe(META_TOOLS.find((t) => t.name === "call_tools")!.description);
+  });
 });
 
 describe("handleMetaTool", () => {
@@ -83,10 +146,12 @@ describe("handleMetaTool", () => {
       expect((result.content[0] as any).text).toContain("'query' is required");
     });
 
-    it("handles no results", async () => {
+    it("handles no results and guides toward list_mcp_servers", async () => {
       vi.mocked(broker.searchTools).mockReturnValue([]);
       const result = await handleMetaTool(broker, "search_tools", { query: "nothing" });
-      expect((result.content[0] as any).text).toContain("No tools found");
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("No tools found");
+      expect(text).toContain("list_mcp_servers");
     });
 
     it("passes limit parameter", async () => {
@@ -168,7 +233,7 @@ describe("handleMetaTool", () => {
   // ── list_mcp_servers ────────────────────────────────
 
   describe("list_mcp_servers", () => {
-    it("formats server list as summary (no per-tool listing)", async () => {
+    it("formats server list as summary and guides toward search_tools", async () => {
       vi.mocked(broker.listServers).mockReturnValue([
         { name: "github", connected: true, toolCount: 2 },
         { name: "fs", connected: false, toolCount: 1 },
@@ -182,6 +247,8 @@ describe("handleMetaTool", () => {
       expect(text).toContain("disconnected");
       // Should NOT contain per-tool details
       expect(text).not.toContain("create_issue");
+      // Should guide toward search_tools
+      expect(text).toContain("search_tools");
     });
 
     it("handles empty server list", async () => {
@@ -194,7 +261,7 @@ describe("handleMetaTool", () => {
   // ── get_mcp_server ──────────────────────────────────
 
   describe("get_mcp_server", () => {
-    it("returns detailed server info with tool listing", async () => {
+    it("returns detailed server info with tool listing and guides toward search_tools", async () => {
       vi.mocked(broker.getServer).mockReturnValue({
         name: "github",
         command: "npx",
@@ -220,6 +287,9 @@ describe("handleMetaTool", () => {
       expect(text).toContain("create_issue");
       expect(text).toContain("list_repos");
       expect(text).toContain("connected");
+      // Should guide toward search_tools
+      expect(text).toContain("search_tools");
+      expect(text).toContain("call_tools");
     });
 
     it("returns error when name is missing", async () => {

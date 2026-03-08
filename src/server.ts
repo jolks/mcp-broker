@@ -35,6 +35,7 @@ export const META_TOOLS: Tool[] = [
       },
       required: ["query"],
     },
+    annotations: { title: "Search Available Tools", readOnlyHint: true },
   },
   {
     name: "add_mcp_server",
@@ -58,6 +59,7 @@ export const META_TOOLS: Tool[] = [
       },
       required: ["name", "command"],
     },
+    annotations: { idempotentHint: true },
   },
   {
     name: "remove_mcp_server",
@@ -69,21 +71,24 @@ export const META_TOOLS: Tool[] = [
       },
       required: ["name"],
     },
+    annotations: { destructiveHint: true },
   },
   {
     name: "list_mcp_servers",
     description:
-      "List all registered MCP servers with their connection status and tool counts. " +
-      "Use get_mcp_server for detailed info including tool listings.",
+      "List all registered MCP servers with connection status and tool counts. " +
+      "Use when search_tools returns no results to see what servers are available, then refine your search query.",
     inputSchema: {
       type: "object" as const,
       properties: {},
     },
+    annotations: { title: "List Servers", readOnlyHint: true },
   },
   {
     name: "get_mcp_server",
     description:
-      "Get detailed info for a single MCP server including config, connection status, and full tool listing.",
+      "Get detailed info for a server including all its tool names. " +
+      "Use to see what tools a specific server offers, then call search_tools with better keywords.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -91,6 +96,7 @@ export const META_TOOLS: Tool[] = [
       },
       required: ["name"],
     },
+    annotations: { title: "Server Details", readOnlyHint: true },
   },
   {
     name: "update_mcp_server",
@@ -115,6 +121,7 @@ export const META_TOOLS: Tool[] = [
       },
       required: ["name"],
     },
+    annotations: { idempotentHint: true },
   },
   {
     name: "refresh_tools",
@@ -129,13 +136,14 @@ export const META_TOOLS: Tool[] = [
         },
       },
     },
+    annotations: { idempotentHint: true },
   },
   {
     name: "call_tools",
     description:
-      "Call one or more tools discovered via search_tools. " +
-      "Pass an array of invocations with server_name, tool_name, and arguments from the search results. " +
-      "Multiple invocations are executed in parallel.",
+      "Call tools discovered via search_tools. " +
+      "You MUST call search_tools first — tool names and schemas come from search results. " +
+      "Pass an array of invocations executed in parallel.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -155,10 +163,38 @@ export const META_TOOLS: Tool[] = [
       },
       required: ["invocations"],
     },
+    annotations: { title: "Invoke Tools", openWorldHint: true },
   },
 ];
 
 const META_TOOL_NAMES = new Set(META_TOOLS.map((t) => t.name));
+
+// ── Dynamic description builder ──────────────────────────
+
+export function buildDynamicTools(
+  servers: Array<{ name: string; toolCount: number }>
+): Tool[] {
+  const totalTools = servers.reduce((sum, s) => sum + s.toolCount, 0);
+
+  return META_TOOLS.map((t) => {
+    if (t.name !== "search_tools" || servers.length === 0) return t;
+
+    const MAX_LISTED = 10;
+    const names = servers.map((s) => s.name);
+    const serverNames =
+      names.length <= MAX_LISTED
+        ? names.join(", ")
+        : names.slice(0, MAX_LISTED).join(", ") + `, and ${names.length - MAX_LISTED} more`;
+
+    return {
+      ...t,
+      description:
+        `ALWAYS call this FIRST. This gateway provides access to ${totalTools} tools ` +
+        `across ${servers.length} server(s) (${serverNames}). ` +
+        "Search by keyword to discover tools, then use call_tools to invoke them.",
+    };
+  });
+}
 
 // ── Server setup ───────────────────────────────────────
 
@@ -184,7 +220,8 @@ export async function startServer(broker: Broker): Promise<Server> {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     logger.info(`tools/list called (${META_TOOLS.length} meta-tools)`);
-    return { tools: META_TOOLS };
+    const tools = buildDynamicTools(broker.listServers());
+    return { tools };
   });
 
   // ── tools/call handler ─────────────────────────────
@@ -240,7 +277,7 @@ export async function handleMetaTool(
           content: [
             {
               type: "text",
-              text: `No tools found matching "${query}". Try different keywords.`,
+              text: `No tools found matching "${query}". Try different keywords, or call list_mcp_servers to browse available servers.`,
             },
           ],
         };
@@ -329,7 +366,14 @@ export async function handleMetaTool(
       const lines = servers.map(
         (s) => `- **${s.name}**: ${s.toolCount} tools | ${s.connected ? "connected" : "disconnected"}`
       );
-      return { content: [{ type: "text", text: lines.join("\n") }] };
+      return {
+        content: [
+          {
+            type: "text",
+            text: lines.join("\n") + "\n\nTo find and call specific tools, use search_tools with a keyword.",
+          },
+        ],
+      };
     }
 
     case "get_mcp_server": {
@@ -361,7 +405,16 @@ export async function handleMetaTool(
       } else {
         lines.push("  (no tools indexed)");
       }
-      return { content: [{ type: "text", text: lines.join("\n") }] };
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              lines.join("\n") +
+              "\n\nUse search_tools with a tool name above to get its input schema, then call_tools to invoke it.",
+          },
+        ],
+      };
     }
 
     case "update_mcp_server": {
