@@ -53,20 +53,29 @@ export class Broker {
       invocations.map((inv) => this.callTool(inv.server_name, inv.tool_name, inv.arguments ?? {}))
     );
 
-    const output = invocations.map((inv, i) => {
-      const r = results[i];
-      return {
-        server_name: inv.server_name,
-        tool_name: inv.tool_name,
-        ...(r.status === "fulfilled"
-          ? r.value
-          : { content: [{ type: "text", text: String(r.reason) }], isError: true }),
-      };
-    });
+    // Single invocation: pass through the downstream result as-is (zero overhead)
+    if (invocations.length === 1) {
+      const r = results[0];
+      if (r.status === "fulfilled") return r.value;
+      return { content: [{ type: "text", text: String(r.reason) }], isError: true };
+    }
 
-    return {
-      content: [{ type: "text", text: JSON.stringify(output) }],
-    };
+    // Multiple invocations: flatten content arrays with text headers
+    const content: CallToolResult["content"] = [];
+    let hasError = false;
+    for (let i = 0; i < invocations.length; i++) {
+      const inv = invocations[i];
+      const r = results[i];
+      content.push({ type: "text" as const, text: `[${inv.server_name}/${inv.tool_name}]` });
+      if (r.status === "fulfilled") {
+        content.push(...(r.value.content ?? []));
+        if (r.value.isError) hasError = true;
+      } else {
+        content.push({ type: "text" as const, text: String(r.reason) });
+        hasError = true;
+      }
+    }
+    return { content, ...(hasError ? { isError: true } : {}) };
   }
 
   private async callTool(

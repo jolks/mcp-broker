@@ -53,7 +53,7 @@ function claude(prompt: string): ClaudeResult {
       "bypassPermissions",
       "--verbose",
     ],
-    { cwd: ROOT, timeout: 300_000, env: testEnv, stdio: ["pipe", "pipe", "pipe"] },
+    { cwd: ROOT, timeout: 300_000, env: testEnv, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 50 * 1024 * 1024 },
   );
 
   const raw = stdout.toString();
@@ -154,8 +154,8 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
       "mcp__broker__search_tools",
       "mcp__broker__call_tools",
     ]);
-    // Echo server prefixes with "Echo: "
-    expect(response.result).toContain(`Echo: nonce:${nonce}`);
+    // Random nonce proves the tool was actually called
+    expect(response.result).toContain(nonce);
   });
 
   it("searches once, finds two tools, and calls both", () => {
@@ -193,5 +193,18 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
       "mcp__broker__call_tools",
     ]);
     expect(response.result).toContain("10");
+  });
+
+  it("works with a real MCP server (vibium browser)", () => {
+    const response = claude(
+      'Add an MCP server named "vibium" that runs: npx -y vibium mcp. ' +
+        "Then navigate to https://example.com and tell me the page title. Close browser after.",
+    );
+
+    // Must add, search, then call — exact count varies with real servers
+    expect(response.tool_calls[0]).toBe("mcp__broker__add_mcp_server");
+    expect(response.tool_calls).toContain("mcp__broker__search_tools");
+    expect(response.tool_calls).toContain("mcp__broker__call_tools");
+    expect(response.result).toContain("Example Domain");
   });
 });

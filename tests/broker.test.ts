@@ -95,7 +95,7 @@ describe("Broker", () => {
   // ── callTools ───────────────────────────────────────
 
   describe("callTools", () => {
-    it("gets client from pool and calls tool", async () => {
+    it("passes through single invocation result directly", async () => {
       const mockClient = {
         callTool: vi.fn().mockResolvedValue({
           content: [{ type: "text", text: "result" }],
@@ -111,11 +111,9 @@ describe("Broker", () => {
         name: "tool",
         arguments: { arg: "value" },
       });
-      const output = JSON.parse((result.content[0] as any).text);
-      expect(output).toHaveLength(1);
-      expect(output[0].server_name).toBe("srv");
-      expect(output[0].tool_name).toBe("tool");
-      expect(output[0].content[0]).toEqual({ type: "text", text: "result" });
+      // Single invocation: result passed through as-is
+      expect(result.content).toEqual([{ type: "text", text: "result" }]);
+      expect(result.isError).toBeUndefined();
     });
 
     it("returns error when server not connected", async () => {
@@ -124,9 +122,9 @@ describe("Broker", () => {
       const result = await broker.callTools([
         { server_name: "srv", tool_name: "tool" },
       ]);
-      const output = JSON.parse((result.content[0] as any).text);
-      expect(output[0].isError).toBe(true);
-      expect(output[0].content[0].text).toContain("not connected");
+      // Single invocation: error passed through directly
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as any).text).toContain("not connected");
     });
 
     it("returns error when underlying callTool throws", async () => {
@@ -138,12 +136,12 @@ describe("Broker", () => {
       const result = await broker.callTools([
         { server_name: "srv", tool_name: "tool" },
       ]);
-      const output = JSON.parse((result.content[0] as any).text);
-      expect(output[0].isError).toBe(true);
-      expect(output[0].content[0].text).toContain("timeout");
+      // Single invocation: error passed through directly
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as any).text).toContain("timeout");
     });
 
-    it("executes multiple invocations in parallel", async () => {
+    it("flattens multiple invocations with headers", async () => {
       const mockClient = {
         callTool: vi.fn()
           .mockResolvedValueOnce({ content: [{ type: "text", text: "r1" }] })
@@ -155,12 +153,14 @@ describe("Broker", () => {
         { server_name: "srv", tool_name: "t1", arguments: {} },
         { server_name: "srv", tool_name: "t2", arguments: {} },
       ]);
-      const output = JSON.parse((result.content[0] as any).text);
-      expect(output).toHaveLength(2);
-      expect(output[0].tool_name).toBe("t1");
-      expect(output[0].content[0].text).toBe("r1");
-      expect(output[1].tool_name).toBe("t2");
-      expect(output[1].content[0].text).toBe("r2");
+      // Multiple invocations: flattened with headers
+      expect(result.content).toEqual([
+        { type: "text", text: "[srv/t1]" },
+        { type: "text", text: "r1" },
+        { type: "text", text: "[srv/t2]" },
+        { type: "text", text: "r2" },
+      ]);
+      expect(result.isError).toBeUndefined();
     });
 
     it("handles partial failure (one succeeds, one fails)", async () => {
@@ -176,12 +176,14 @@ describe("Broker", () => {
         { server_name: "good", tool_name: "t1" },
         { server_name: "bad", tool_name: "t2" },
       ]);
-      const output = JSON.parse((result.content[0] as any).text);
-      expect(output).toHaveLength(2);
-      expect(output[0].content[0].text).toBe("ok");
-      expect(output[0].isError).toBeUndefined();
-      expect(output[1].isError).toBe(true);
-      expect(output[1].content[0].text).toContain("not connected");
+      // Multiple invocations: flattened with headers, isError set
+      expect(result.content).toEqual([
+        { type: "text", text: "[good/t1]" },
+        { type: "text", text: "ok" },
+        { type: "text", text: "[bad/t2]" },
+        { type: "text", text: expect.stringContaining("not connected") },
+      ]);
+      expect(result.isError).toBe(true);
     });
   });
 
