@@ -1,6 +1,6 @@
 {
   "name": "mcp-broker",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One MCP server for all your tools — configure once, use everywhere",
   "type": "module",
   "bin": {
