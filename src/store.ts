@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import { logger } from "./logger.js";
-import { dbPath as defaultDbPath, FILE_PERMISSION, TOOL_PREFIX_SEPARATOR } from "./config.js";
+import { dbPath as defaultDbPath, FILE_PERMISSION, TOOL_PREFIX_SEPARATOR, DEFAULT_SEARCH_LIMIT } from "./config.js";
 
 /** Build prefixed tool name: "server__tool" */
 function prefixToolName(serverName: string, toolName: string): string {
@@ -202,7 +202,7 @@ export class Store {
 
   // ── FTS5 Search ──────────────────────────────────────────
 
-  searchTools(query: string, limit: number = 20): SearchResult[] {
+  searchTools(query: string, limit: number = DEFAULT_SEARCH_LIMIT): SearchResult[] {
     const sanitized = this.sanitizeFtsQuery(query);
     if (!sanitized) return [];
 
@@ -239,10 +239,13 @@ export class Store {
     // Remove FTS5 special characters to prevent injection, keep alphanumeric and spaces
     const cleaned = query.replace(/[^\w\s]/g, " ").trim();
     if (!cleaned) return "";
-    // Convert to prefix search terms for better matching
+    // Convert to prefix search terms with OR semantics for better matching.
+    // LLMs often search for multiple unrelated tool names in one query
+    // (e.g., "browser navigate snapshot close") — AND would require ALL terms
+    // in a single tool, returning nothing. OR finds tools matching ANY term,
+    // with BM25 ranking putting the most relevant matches first.
     const terms = cleaned.split(/\s+/).filter(Boolean);
-    // Use implicit AND: each term as a prefix search
-    return terms.map((t) => `"${t}"*`).join(" ");
+    return terms.map((t) => `"${t}"*`).join(" OR ");
   }
 
   // ── Transaction ──────────────────────────────────────────

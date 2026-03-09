@@ -5,6 +5,7 @@ import type { Broker } from "../src/broker.js";
 function makeBroker(): Broker {
   return {
     searchTools: vi.fn(() => []),
+    searchToolsMulti: vi.fn(() => []),
     callTools: vi.fn(),
     addServer: vi.fn(),
     removeServer: vi.fn(),
@@ -18,8 +19,8 @@ function makeBroker(): Broker {
 }
 
 describe("META_TOOLS", () => {
-  it("defines exactly 8 meta-tools", () => {
-    expect(META_TOOLS).toHaveLength(8);
+  it("defines exactly 7 meta-tools", () => {
+    expect(META_TOOLS).toHaveLength(7);
   });
 
   it("includes all expected tool names", () => {
@@ -31,7 +32,6 @@ describe("META_TOOLS", () => {
       "list_mcp_servers",
       "get_mcp_server",
       "update_mcp_server",
-      "refresh_tools",
       "call_tools",
     ]);
   });
@@ -140,10 +140,25 @@ describe("handleMetaTool", () => {
       expect(text).toContain("call_tools");
     });
 
-    it("returns error when query is missing", async () => {
+    it("returns error when neither query nor queries provided", async () => {
       const result = await handleMetaTool(broker, "search_tools", {});
       expect(result.isError).toBe(true);
-      expect((result.content[0] as any).text).toContain("'query' is required");
+      expect((result.content[0] as any).text).toContain("'query' or 'queries' is required");
+    });
+
+    it("returns error when both query and queries provided", async () => {
+      const result = await handleMetaTool(broker, "search_tools", {
+        query: "test",
+        queries: ["a", "b"],
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as any).text).toContain("provide either 'query' or 'queries', not both");
+    });
+
+    it("returns error when queries is empty array", async () => {
+      const result = await handleMetaTool(broker, "search_tools", { queries: [] });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as any).text).toContain("'queries' must be a non-empty array");
     });
 
     it("handles no results and guides toward list_mcp_servers", async () => {
@@ -158,6 +173,36 @@ describe("handleMetaTool", () => {
       vi.mocked(broker.searchTools).mockReturnValue([]);
       await handleMetaTool(broker, "search_tools", { query: "test", limit: 5 });
       expect(broker.searchTools).toHaveBeenCalledWith("test", 5);
+    });
+
+    it("queries delegates to broker.searchToolsMulti", async () => {
+      vi.mocked(broker.searchToolsMulti).mockReturnValue([
+        {
+          id: "srv__tool",
+          server_name: "srv",
+          tool_name: "tool",
+          description: "A tool",
+          input_schema: { type: "object", properties: {} },
+          rank: -1,
+        },
+      ]);
+
+      const result = await handleMetaTool(broker, "search_tools", {
+        queries: ["navigate", "title"],
+      });
+      expect(broker.searchToolsMulti).toHaveBeenCalledWith(["navigate", "title"], undefined);
+      expect(result.isError).toBeUndefined();
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("Found 1 tool(s) across 2 queries:");
+    });
+
+    it("queries no results includes query list in message", async () => {
+      vi.mocked(broker.searchToolsMulti).mockReturnValue([]);
+      const result = await handleMetaTool(broker, "search_tools", {
+        queries: ["foo", "bar"],
+      });
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("No tools found matching [foo, bar]");
     });
   });
 
@@ -398,22 +443,6 @@ describe("handleMetaTool", () => {
     });
   });
 
-  // ── refresh_tools ───────────────────────────────────
-
-  describe("refresh_tools", () => {
-    it("delegates to broker.refreshTools with server name", async () => {
-      const result = await handleMetaTool(broker, "refresh_tools", { server_name: "github" });
-      expect(broker.refreshTools).toHaveBeenCalledWith("github");
-      expect((result.content[0] as any).text).toContain('"github"');
-    });
-
-    it("refreshes all when no server name", async () => {
-      const result = await handleMetaTool(broker, "refresh_tools", {});
-      expect(broker.refreshTools).toHaveBeenCalledWith(undefined);
-      expect((result.content[0] as any).text).toContain("all servers");
-    });
-  });
-
   // ── call_tools ─────────────────────────────────────
 
   describe("call_tools", () => {
@@ -428,9 +457,10 @@ describe("handleMetaTool", () => {
         ],
       });
 
-      expect(broker.callTools).toHaveBeenCalledWith([
-        { server_name: "github", tool_name: "create_issue", arguments: { title: "Bug" } },
-      ]);
+      expect(broker.callTools).toHaveBeenCalledWith(
+        [{ server_name: "github", tool_name: "create_issue", arguments: { title: "Bug" } }],
+        undefined
+      );
       expect((result.content[0] as any).text).toBe("result");
     });
 
@@ -445,7 +475,7 @@ describe("handleMetaTool", () => {
       ];
       const result = await handleMetaTool(broker, "call_tools", { invocations });
 
-      expect(broker.callTools).toHaveBeenCalledWith(invocations);
+      expect(broker.callTools).toHaveBeenCalledWith(invocations, undefined);
       expect((result.content[0] as any).text).toBe("multi-result");
     });
 
@@ -460,9 +490,10 @@ describe("handleMetaTool", () => {
         arguments: {},
       });
 
-      expect(broker.callTools).toHaveBeenCalledWith([
-        { server_name: "cron", tool_name: "list_tasks", arguments: {} },
-      ]);
+      expect(broker.callTools).toHaveBeenCalledWith(
+        [{ server_name: "cron", tool_name: "list_tasks", arguments: {} }],
+        undefined
+      );
       expect((result.content[0] as any).text).toBe("flat-result");
     });
 
@@ -476,6 +507,37 @@ describe("handleMetaTool", () => {
       const result = await handleMetaTool(broker, "call_tools", { invocations: [] });
       expect(result.isError).toBe(true);
       expect((result.content[0] as any).text).toContain("'invocations' must be a non-empty array");
+    });
+
+    it("passes sequential option to broker.callTools", async () => {
+      vi.mocked(broker.callTools).mockResolvedValue({
+        content: [{ type: "text", text: "result" }],
+      });
+
+      await handleMetaTool(broker, "call_tools", {
+        invocations: [{ server_name: "srv", tool_name: "t1" }],
+        sequential: true,
+      });
+
+      expect(broker.callTools).toHaveBeenCalledWith(
+        [{ server_name: "srv", tool_name: "t1" }],
+        { sequential: true }
+      );
+    });
+
+    it("does not pass sequential option when not set", async () => {
+      vi.mocked(broker.callTools).mockResolvedValue({
+        content: [{ type: "text", text: "result" }],
+      });
+
+      await handleMetaTool(broker, "call_tools", {
+        invocations: [{ server_name: "srv", tool_name: "t1" }],
+      });
+
+      expect(broker.callTools).toHaveBeenCalledWith(
+        [{ server_name: "srv", tool_name: "t1" }],
+        undefined
+      );
     });
   });
 

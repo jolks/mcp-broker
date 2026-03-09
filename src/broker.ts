@@ -4,7 +4,7 @@ import { Pool } from "./pool.js";
 import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
-import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS } from "./config.js";
+import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS, DEFAULT_SEARCH_LIMIT } from "./config.js";
 import type { McpServerEntry } from "./client-config.js";
 
 export interface ToolInvocation {
@@ -17,6 +17,10 @@ export interface ServerUpdate {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+}
+
+export interface CallToolsOptions {
+  sequential?: boolean;
 }
 
 export interface ServerDetail {
@@ -48,9 +52,27 @@ export class Broker {
     return this.store.searchTools(query, limit);
   }
 
+  searchToolsMulti(queries: string[], limit?: number): SearchResult[] {
+    const perQuery = limit ?? DEFAULT_SEARCH_LIMIT;
+    const seen = new Map<string, SearchResult>();
+    for (const query of queries) {
+      for (const result of this.store.searchTools(query, perQuery)) {
+        const existing = seen.get(result.id);
+        if (!existing || result.rank < existing.rank) {
+          seen.set(result.id, result); // keep best rank (BM25: lower = better)
+        }
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) => a.rank - b.rank);
+  }
+
   // ── Call Tools ──────────────────────────────────────────
 
-  async callTools(invocations: ToolInvocation[]): Promise<CallToolResult> {
+  async callTools(invocations: ToolInvocation[], options?: CallToolsOptions): Promise<CallToolResult> {
+    if (options?.sequential) {
+      return this.callToolsSequential(invocations);
+    }
+
     const results = await Promise.allSettled(
       invocations.map((inv) => this.callTool(inv.server_name, inv.tool_name, inv.arguments ?? {}))
     );
@@ -80,6 +102,18 @@ export class Broker {
     return { content, ...(hasError ? { isError: true } : {}) };
   }
 
+  private async callToolsSequential(invocations: ToolInvocation[]): Promise<CallToolResult> {
+    const content: CallToolResult["content"] = [];
+    let hasError = false;
+    for (const inv of invocations) {
+      content.push({ type: "text" as const, text: `[${inv.server_name}/${inv.tool_name}]` });
+      const result = await this.callTool(inv.server_name, inv.tool_name, inv.arguments ?? {});
+      content.push(...(result.content ?? []));
+      if (result.isError) { hasError = true; break; }
+    }
+    return { content, ...(hasError ? { isError: true } : {}) };
+  }
+
   private async callTool(
     serverName: string,
     toolName: string,
@@ -91,7 +125,7 @@ export class Broker {
         content: [
           {
             type: "text",
-            text: `Server "${serverName}" is not connected. Try refresh_tools or wait for reconnect.`,
+            text: `Server "${serverName}" is not connected. Wait for reconnect, or restart mcp-broker / your LLM client.`,
           },
         ],
         isError: true,

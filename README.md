@@ -6,7 +6,7 @@ Configure one MCP server instead of dozens. mcp-broker acts as a single gateway 
 
 ## The Problem
 
-1. **Context bloat** — 10+ MCP servers exposing 100+ tools means every tool schema is sent to the LLM on every request. This wastes context tokens and degrades tool selection accuracy.
+1. **Context bloat** — 10+ MCP servers exposing 100+ tools means every tool schema is sent to the LLM on every request. This degrades tool selection accuracy — LLMs perform worse at choosing the right tool as the number of visible tools grows.
 
 2. **Fragmented configs** — MCP servers are scattered across Cursor, Claude Desktop, Windsurf, and Claude Code configs. Add a new server? Update 4 files. Remove one? Hope you didn't miss a config.
 
@@ -14,12 +14,13 @@ Configure one MCP server instead of dozens. mcp-broker acts as a single gateway 
 
 mcp-broker maintains a single `servers.json` registry. Any AI client that connects to mcp-broker gets access to all your MCP servers. Set up once, add mcp-broker to each client, done. Because it speaks standard MCP, it works with any AI client or LLM that supports the protocol — no vendor lock-in.
 
-Instead of exposing all tools, mcp-broker exposes **8 meta-tools**. The LLM searches for relevant tools on-demand via FTS5 full-text search, then calls them through the broker:
+Instead of exposing all tools, mcp-broker exposes **7 meta-tools**. The LLM searches for relevant tools on-demand via FTS5 full-text search, then calls them through the broker. `search_tools` supports multi-query search — the LLM can search for multiple aspects of a task in a single call:
 
 ```
-LLM → search_tools("github issue")     → FTS5 lookup → returns tool schemas
-LLM → call_tools([{server_name: "github", tool_name: "create_issue", arguments: {...}}])
-                                        → broker routes to downstream server
+LLM → search_tools(queries: ["browser navigate", "page title", "browser close"])
+    → FTS5 lookup per query → deduplicated, ranked results
+LLM → call_tools([{server_name: "vibium", tool_name: "browser_navigate", arguments: {...}}, ...])
+    → broker routes each invocation to its downstream server
 ```
 
 ## Quick Start
@@ -79,14 +80,13 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 
 | Tool | Description |
 |---|---|
-| `search_tools` | Full-text search across all servers' tools. Returns names, descriptions, and input schemas. Description is dynamic — includes actual server names and total tool count so the LLM knows what's available. |
+| `search_tools` | Full-text search across all servers' tools. Accepts `query` (single) or `queries` (array for multi-aspect search in one call). Returns names, descriptions, and input schemas. Description is dynamic — includes actual server names and total tool count. |
 | `call_tools` | Invoke one or more discovered tools via search_tools results. Multiple invocations execute in parallel. |
 | `add_mcp_server` | Register a new MCP server. Harvests and indexes its tools. |
 | `remove_mcp_server` | Remove a server and its indexed tools. |
 | `list_mcp_servers` | List all servers with connection status and tool counts. Guides toward search_tools when search returns no results. |
 | `get_mcp_server` | Get detailed info for a server including version, all tool names. Guides toward search_tools for schema lookup. |
 | `update_mcp_server` | Update a server's config (command, args, env). Re-harvests and reconnects. |
-| `refresh_tools` | Re-harvest tools from one or all servers. |
 
 ## Architecture
 
@@ -100,7 +100,7 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 ```
 
 - **Registry** — `servers.json` is the source of truth. SQLite is a rebuildable index — delete the DB and it's rebuilt on next startup.
-- **Store** — SQLite + FTS5 with Porter stemming for fast full-text search. On startup, servers with tools older than 5 minutes are re-harvested in the background (non-blocking). Since startup only runs when the LLM client spawns the process, mid-session tool changes require a manual `refresh_tools` call.
+- **Store** — SQLite + FTS5 with Porter stemming for fast full-text search. On startup, servers with tools older than 5 minutes are re-harvested in the background (non-blocking). To pick up tool changes from a server upgrade, restart mcp-broker or your LLM client.
 - **Pool** — Eager connection manager with auto-reconnect.
 - **Harvester** — Discovers tools from a server via `tools/list` with pagination.
 
@@ -116,16 +116,30 @@ npx mcp-broker restore <config>   # Restore a client config (e.g. ~/.cursor/mcp.
 
 ## Token Savings
 
-mcp-broker replaces all your tool schemas with 8 fixed meta-tool schemas (~1,600 tokens). Savings compound on every turn.
+mcp-broker replaces all your tool schemas with 7 fixed meta-tool schemas (~1,400 tokens). Savings compound on every turn.
 
 | Tools | 5-turn task | 20-turn task | Savings |
 |---|---|---|---|
-| 20 | 1,350 tokens saved | 7,350 saved | ~18% |
-| 50 | 11,350 tokens saved | 47,350 saved | ~60% |
-| 100 | 36,350 tokens saved | 147,350 saved | ~82% |
-| 200 | 86,350 tokens saved | 347,350 saved | ~91% |
+| 20 | 2,350 tokens saved | 11,350 saved | ~28% |
+| 50 | 17,350 tokens saved | 71,350 saved | ~71% |
+| 100 | 42,350 tokens saved | 171,350 saved | ~86% |
+| 200 | 92,350 tokens saved | 371,350 saved | ~93% |
 
-Break-even is ~16 tools. Below that, direct configuration is simpler. See [Token Savings Analysis](docs/token-savings.md) for more details.
+Break-even is ~14 tools. Below that, direct configuration is simpler.
+
+### Real-world E2E cost comparison
+
+Tested with vibium (81 browser automation tools) on Claude Code — navigate to a page, get the title, close the browser. Each run is fully isolated in its own temp directory with no shared MCP configs:
+
+| | Turns | Tool calls | Cost |
+|---|---|---|---|
+| **Direct MCP** (81 tool schemas every turn) | 6 | 4 separate calls | $0.0950 |
+| **mcp-broker** (7 meta-tool schemas + multi-query search) | 4 | 1 search + 1 batched call | **$0.0708** |
+| **Savings** | | | **25.5%** |
+
+The broker's multi-query `search_tools` found all needed tools in one call (`["browser navigate", "page title", "browser close"]`), then `call_tools` executed the entire workflow (navigate → get_title → stop) in a single batched call. Fewer turns = less token overhead, even with prompt caching.
+
+**Prompt caching note:** Anthropic and OpenAI both cache repeated system prompt content (including tool schemas) at a 90% discount on subsequent turns. This reduces the effective per-turn cost of direct tool schemas, but the broker's turn-elimination advantage (batching multiple tool calls into one turn) compounds on top of caching savings. The broker's additional advantages include tool selection accuracy (fewer tools = less LLM confusion) and centralized multi-client management. See [Token Savings Analysis](docs/token-savings.md) for the full breakdown.
 
 ## Requirements
 

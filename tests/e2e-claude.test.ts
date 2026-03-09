@@ -36,14 +36,19 @@ interface ClaudeResult {
   tool_calls_per_turn: string[][];
 }
 
-function claude(prompt: string): ClaudeResult {
+function claude(
+  prompt: string,
+  mcpConfigPath: string = TEST_MCP_CONFIG,
+  env: Record<string, string> = testEnv,
+  cwd: string = ROOT,
+): ClaudeResult {
   const stdout = execFileSync(
     "claude",
     [
       "-p",
       prompt,
       "--mcp-config",
-      TEST_MCP_CONFIG,
+      mcpConfigPath,
       "--output-format",
       "stream-json",
       "--max-turns",
@@ -53,7 +58,7 @@ function claude(prompt: string): ClaudeResult {
       "bypassPermissions",
       "--verbose",
     ],
-    { cwd: ROOT, timeout: 300_000, env: testEnv, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 50 * 1024 * 1024 },
+    { cwd, timeout: 300_000, env, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 50 * 1024 * 1024 },
   );
 
   const raw = stdout.toString();
@@ -66,16 +71,25 @@ function claude(prompt: string): ClaudeResult {
   const allToolCalls: string[] = [];
   const toolCalls: string[] = [];
   const toolCallsPerTurn: string[][] = [];
+  let turnNum = 0;
   for (const event of events) {
     if (event.type === "assistant" && Array.isArray(event.message?.content)) {
+      turnNum++;
       const turnTools: string[] = [];
       for (const block of event.message.content) {
         if (block.type === "tool_use") {
           allToolCalls.push(block.name);
+          // Log detailed tool call info for observability
+          const inputSummary = block.input ? JSON.stringify(block.input) : "{}";
+          console.error(`[e2e]   turn ${turnNum}: ${block.name}(${inputSummary})`);
           if (block.name.startsWith("mcp__broker__")) {
             toolCalls.push(block.name);
             turnTools.push(block.name);
           }
+        }
+        if (block.type === "text" && block.text) {
+          const textPreview = block.text.slice(0, 120).replace(/\n/g, " ");
+          console.error(`[e2e]   turn ${turnNum}: [text] ${textPreview}`);
         }
       }
       if (turnTools.length > 0) {
@@ -129,7 +143,7 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
     };
     writeFileSync(ECHO_CONFIG_PATH, JSON.stringify(config, null, 2));
 
-    // 4. Seed the broker (uses MCP_BROKER_HOME via testEnv)
+    // 4. Seed the broker with echo server (uses MCP_BROKER_HOME via testEnv)
     execFileSync(
       "node",
       ["dist/index.js", "setup", ECHO_CONFIG_PATH, "--no-rewrite"],
@@ -195,16 +209,60 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
     expect(response.result).toContain("10");
   });
 
-  it("works with a real MCP server (vibium browser)", () => {
-    const response = claude(
-      'Add an MCP server named "vibium" that runs: npx -y vibium mcp. ' +
-        "Then navigate to https://example.com and tell me the page title. Close browser after.",
-    );
+  describe("cost comparison", () => {
+    it("broker vs direct MCP (vibium browser)", () => {
+      const prompt =
+        "Using the vibium browser tools, navigate to https://example.com and tell me the page title. " +
+        "You MUST use vibium browser tools (not WebFetch or any other tool). Close the browser after.";
 
-    // Must add, search, then call — exact count varies with real servers
-    expect(response.tool_calls[0]).toBe("mcp__broker__add_mcp_server");
-    expect(response.tool_calls).toContain("mcp__broker__search_tools");
-    expect(response.tool_calls).toContain("mcp__broker__call_tools");
-    expect(response.result).toContain("Example Domain");
+      // === Direct run (fully isolated — no broker config anywhere) ===
+      const directDir = mkdtempSync(join(tmpdir(), "mcp-broker-e2e-direct-"));
+      const directMcpConfig = join(directDir, "mcp.json");
+      writeFileSync(directMcpConfig, JSON.stringify({
+        mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
+      }));
+      const directEnv = { ...testEnv, MCP_BROKER_HOME: directDir };
+      const directResult = claude(prompt, directMcpConfig, directEnv, directDir);
+      expect(directResult.result).toContain("Example Domain");
+
+      // === Broker run (isolated — fresh broker with vibium seeded) ===
+      const brokerDir = mkdtempSync(join(tmpdir(), "mcp-broker-e2e-broker-"));
+      const brokerEnv = { ...testEnv, MCP_BROKER_HOME: brokerDir };
+      // Seed vibium into this broker instance
+      const vibiumConfig = join(brokerDir, "vibium-config.json");
+      writeFileSync(vibiumConfig, JSON.stringify({
+        mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
+      }));
+      execFileSync(
+        "node",
+        ["dist/index.js", "setup", vibiumConfig, "--no-rewrite"],
+        { cwd: ROOT, timeout: 120_000, stdio: "pipe", env: brokerEnv },
+      );
+      const brokerMcpConfig = join(brokerDir, "mcp.json");
+      writeFileSync(brokerMcpConfig, JSON.stringify({
+        mcpServers: {
+          broker: {
+            command: "node",
+            args: [resolve(ROOT, "dist/index.js"), "serve"],
+            env: { MCP_BROKER_HOME: brokerDir },
+          },
+        },
+      }));
+      const brokerResult = claude(prompt, brokerMcpConfig, brokerEnv);
+      expect(brokerResult.tool_calls).toContain("mcp__broker__search_tools");
+      expect(brokerResult.tool_calls).toContain("mcp__broker__call_tools");
+      expect(brokerResult.result).toContain("Example Domain");
+
+      // Cleanup
+      rmSync(directDir, { recursive: true, force: true });
+      rmSync(brokerDir, { recursive: true, force: true });
+
+      const savings = ((1 - brokerResult.total_cost_usd / directResult.total_cost_usd) * 100).toFixed(1);
+      console.error(
+        `[e2e] cost comparison: broker=$${brokerResult.total_cost_usd.toFixed(4)} ` +
+        `direct=$${directResult.total_cost_usd.toFixed(4)} savings=${savings}%`,
+      );
+      expect(brokerResult.total_cost_usd).toBeLessThanOrEqual(directResult.total_cost_usd);
+    });
   });
 });

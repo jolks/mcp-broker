@@ -27,24 +27,25 @@ pnpm run lint:fix       # Run ESLint with auto-fix
 
 ## Architecture
 
-mcp-broker is an MCP server that acts as a gateway to many downstream MCP servers. Instead of configuring dozens of MCP servers (flooding the LLM context with hundreds of tool schemas), you configure one: mcp-broker. It exposes 8 fixed meta-tools. The LLM uses `search_tools` to discover tools via FTS5 full-text search, then uses `call_tools` to invoke them.
+mcp-broker is an MCP server that acts as a gateway to many downstream MCP servers. Instead of configuring dozens of MCP servers (flooding the LLM context with hundreds of tool schemas), you configure one: mcp-broker. It exposes 7 fixed meta-tools. The LLM uses `search_tools` to discover tools via FTS5 full-text search, then uses `call_tools` to invoke them.
 
-The LLM uses `search_tools` to discover tools (returns names, descriptions, and input schemas), then uses `call_tools` to invoke them by `server_name` and `tool_name`. `call_tools` accepts an array of invocations and executes them in parallel.
+The LLM uses `search_tools` to discover tools (returns names, descriptions, and input schemas), then uses `call_tools` to invoke them by `server_name` and `tool_name`. `search_tools` accepts either `query` (single string) or `queries` (array of strings for multi-aspect search in one call — each runs independently, results are deduplicated and merged). `call_tools` accepts an array of invocations and executes them in parallel.
 
 ### Data flow
 
 ```
-LLM → search_tools("github issue") → FTS5 lookup → returns schemas
-LLM → call_tools(invocations: [{server_name: "github", tool_name: "create_issue", arguments: {...}}])
-    → broker → pool.getClient("github") → client.callTool("create_issue", {...})
+LLM → search_tools(queries: ["browser navigate", "page title", "browser close"])
+    → FTS5 lookup per query → deduplicated, ranked results
+LLM → call_tools(invocations: [{server_name: "vibium", tool_name: "browser_navigate", arguments: {...}}, ...])
+    → broker → pool.getClient("vibium") → client.callTool("browser_navigate", {...})
     → result passed through to LLM
 ```
 
 ### Module responsibilities
 
 - **index.ts** — CLI entry point (commander). Creates Store/Pool/Registry/Broker, wires them together.
-- **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 8 meta-tools with annotations. `search_tools` description is dynamically built with actual server names and tool counts via `buildDynamicTools()`. Response text guides the LLM through a discovery cycle: search → list → get → search again.
-- **broker.ts** — Orchestration layer. Owns search, tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
+- **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 7 meta-tools with annotations. `search_tools` description is dynamically built with actual server names and tool counts via `buildDynamicTools()`. Response text guides the LLM through a discovery cycle: search → list → get → search again.
+- **broker.ts** — Orchestration layer. Owns search (`searchTools` for single query, `searchToolsMulti` for multi-query with dedup), tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
 - **store.ts** — SQLite + FTS5 via better-sqlite3. Tables: `servers`, `tools`, `tools_fts` (virtual). DB at `$MCP_BROKER_HOME/broker.db`. Porter stemming for search. Acts as a rebuildable index.
 - **pool.ts** — Eager connection manager. Connects to all servers on startup via `StdioClientTransport`. Auto-reconnects on disconnect. `Map<serverName, {client, transport}>`.
 - **harvester.ts** — One-shot tool discovery. Spawns a server, calls `tools/list` with pagination, collects schemas, shuts down. 30s timeout.

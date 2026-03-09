@@ -20,7 +20,7 @@ export const META_TOOLS: Tool[] = [
       "ALWAYS call this FIRST before attempting any task. " +
       "Searches all connected MCP servers for relevant tools. " +
       "Returns tool names, descriptions, and input schemas. " +
-      "Use call_tools with the server_name and tool_name from results to invoke a tool.",
+      "Use call_tools with the server_name and tool_name from results to invoke them.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -28,12 +28,15 @@ export const META_TOOLS: Tool[] = [
           type: "string",
           description: "Natural language search query (e.g., 'create github issue', 'read file', 'send email')",
         },
-        limit: {
-          type: "number",
-          description: `Maximum number of results (default: ${DEFAULT_SEARCH_LIMIT})`,
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Array of search queries to run independently and merge results. " +
+            "Use when you need tools for different aspects of a task.",
         },
       },
-      required: ["query"],
+      required: [],
     },
     annotations: { title: "Search Available Tools", readOnlyHint: true },
   },
@@ -124,26 +127,12 @@ export const META_TOOLS: Tool[] = [
     annotations: { idempotentHint: true },
   },
   {
-    name: "refresh_tools",
-    description:
-      "Re-harvest tools from one or all MCP servers. Use after a server has been updated with new tools.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        server_name: {
-          type: "string",
-          description: "Specific server to refresh (omit to refresh all)",
-        },
-      },
-    },
-    annotations: { idempotentHint: true },
-  },
-  {
     name: "call_tools",
     description:
       "Call tools discovered via search_tools. " +
       "You MUST call search_tools first — tool names and schemas come from search results. " +
-      "Pass an array of invocations executed in parallel.",
+      "Pass an array of invocations (parallel by default). " +
+      "Set sequential: true when steps must run in order and all arguments are known upfront.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -158,7 +147,11 @@ export const META_TOOLS: Tool[] = [
             },
             required: ["server_name", "tool_name"],
           },
-          description: "Array of tool invocations to execute in parallel",
+          description: "Array of tool invocations",
+        },
+        sequential: {
+          type: "boolean",
+          description: "Execute invocations in order (not parallel). Use when steps must run in sequence and all arguments are known upfront.",
         },
       },
       required: ["invocations"],
@@ -209,9 +202,12 @@ export async function startServer(broker: Broker): Promise<Server> {
         "mcp-broker is a tool gateway that provides access to tools from many other MCP servers. " +
         "You do NOT have direct access to those tools — you must first discover them.\n\n" +
         "WORKFLOW:\n" +
-        "1. ALWAYS call search_tools first to find relevant tools for the user's request.\n" +
-        "2. search_tools returns tool names and schemas. Use call_tools to invoke a discovered tool.\n" +
-        "3. Pass server_name, tool_name, and arguments from the search results to call_tools.\n\n" +
+        "1. ALWAYS call search_tools first to find ALL tools you will need for the task. Use queries (array) to search for multiple aspects at once.\n" +
+        "2. search_tools returns tool names, descriptions, and input schemas.\n" +
+        "3. Use call_tools to invoke discovered tools:\n" +
+        "   - Independent operations: batch in one call (parallel by default)\n" +
+        "   - Sequential workflows (step1 → step2 → ...): batch with sequential: true\n" +
+        "   - Only use separate call_tools calls when you need to inspect an intermediate result before deciding the next step\n\n" +
         "IMPORTANT: Do not guess tool names. Always search first.",
     }
   );
@@ -265,19 +261,32 @@ export async function handleMetaTool(
 ): Promise<CallToolResult> {
   switch (name) {
     case "search_tools": {
-      const query = args.query as string;
-      if (!query) {
-        return { content: [{ type: "text", text: "Error: 'query' is required" }], isError: true };
+      const query = args.query as string | undefined;
+      const queries = args.queries as string[] | undefined;
+
+      if (query && queries) {
+        return { content: [{ type: "text", text: "Error: provide either 'query' or 'queries', not both" }], isError: true };
       }
+      if (!query && !queries) {
+        return { content: [{ type: "text", text: "Error: 'query' or 'queries' is required" }], isError: true };
+      }
+      if (queries && queries.length === 0) {
+        return { content: [{ type: "text", text: "Error: 'queries' must be a non-empty array" }], isError: true };
+      }
+
       const limit = args.limit as number | undefined;
-      const results = broker.searchTools(query, limit);
+      const isMulti = !!queries;
+      const results = isMulti
+        ? broker.searchToolsMulti(queries, limit)
+        : broker.searchTools(query!, limit);
 
       if (results.length === 0) {
+        const searchDesc = isMulti ? `[${queries.join(", ")}]` : `"${query}"`;
         return {
           content: [
             {
               type: "text",
-              text: `No tools found matching "${query}". Try different keywords, or call list_mcp_servers to browse available servers.`,
+              text: `No tools found matching ${searchDesc}. Try different keywords, or call list_mcp_servers to browse available servers.`,
             },
           ],
         };
@@ -290,14 +299,21 @@ export async function handleMetaTool(
         return `${i + 1}. ${t.server_name} / ${t.tool_name} — ${t.description}\n   Input: ${props}`;
       });
 
+      const header = isMulti
+        ? `Found ${results.length} tool(s) across ${queries.length} queries:\n\n`
+        : `Found ${results.length} tool(s) matching "${query}":\n\n`;
+
+      const effectiveLimit = limit ?? DEFAULT_SEARCH_LIMIT;
+      const truncated = !isMulti && results.length >= effectiveLimit;
+      const footer = truncated
+        ? `\n\nShowing top ${results.length} results (more may exist — refine your query or increase limit). Use call_tools with server_name and tool_name to invoke.`
+        : "\n\nUse call_tools with server_name and tool_name to invoke.";
+
       return {
         content: [
           {
             type: "text",
-            text:
-              `Found ${results.length} tool(s) matching "${query}":\n\n` +
-              lines.join("\n\n") +
-              "\n\nUse call_tools with the server_name and tool_name to invoke a tool.",
+            text: header + lines.join("\n\n") + footer,
           },
         ],
       };
@@ -465,21 +481,6 @@ export async function handleMetaTool(
       }
     }
 
-    case "refresh_tools": {
-      const serverName = args.server_name as string | undefined;
-      await broker.refreshTools(serverName);
-      return {
-        content: [
-          {
-            type: "text",
-            text: serverName
-              ? `Refreshed tools for "${serverName}".`
-              : "Refreshed tools for all servers.",
-          },
-        ],
-      };
-    }
-
     case "call_tools": {
       // Accept both {invocations: [...]} and flat {server_name, tool_name, arguments}
       let invocations = args.invocations as ToolInvocation[] | undefined;
@@ -492,7 +493,8 @@ export async function handleMetaTool(
           isError: true,
         };
       }
-      return broker.callTools(invocations);
+      const sequential = args.sequential as boolean | undefined;
+      return broker.callTools(invocations, sequential ? { sequential } : undefined);
     }
 
     default:

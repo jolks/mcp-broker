@@ -94,6 +94,74 @@ describe("Broker", () => {
     });
   });
 
+  // ── searchToolsMulti ─────────────────────────────────
+
+  describe("searchToolsMulti", () => {
+    it("runs store.searchTools for each query", () => {
+      vi.mocked(store.searchTools).mockReturnValue([]);
+
+      broker.searchToolsMulti(["navigate", "title"]);
+
+      expect(store.searchTools).toHaveBeenCalledTimes(2);
+      expect(store.searchTools).toHaveBeenCalledWith("navigate", 20);
+      expect(store.searchTools).toHaveBeenCalledWith("title", 20);
+    });
+
+    it("deduplicates by id", () => {
+      const tool: SearchResult = {
+        id: "srv__tool",
+        server_name: "srv",
+        tool_name: "tool",
+        description: "A tool",
+        input_schema: {},
+        rank: -2,
+      };
+      vi.mocked(store.searchTools).mockReturnValue([tool]);
+
+      const results = broker.searchToolsMulti(["q1", "q2"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe("srv__tool");
+    });
+
+    it("keeps best rank on overlap (BM25: lower is better)", () => {
+      vi.mocked(store.searchTools)
+        .mockReturnValueOnce([
+          { id: "srv__tool", server_name: "srv", tool_name: "tool", description: "T", input_schema: {}, rank: -3 },
+        ])
+        .mockReturnValueOnce([
+          { id: "srv__tool", server_name: "srv", tool_name: "tool", description: "T", input_schema: {}, rank: -5 },
+        ]);
+
+      const results = broker.searchToolsMulti(["q1", "q2"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].rank).toBe(-5);
+    });
+
+    it("returns results sorted by rank", () => {
+      vi.mocked(store.searchTools)
+        .mockReturnValueOnce([
+          { id: "srv__b", server_name: "srv", tool_name: "b", description: "B", input_schema: {}, rank: -1 },
+        ])
+        .mockReturnValueOnce([
+          { id: "srv__a", server_name: "srv", tool_name: "a", description: "A", input_schema: {}, rank: -3 },
+        ]);
+
+      const results = broker.searchToolsMulti(["q1", "q2"]);
+      expect(results).toHaveLength(2);
+      expect(results[0].id).toBe("srv__a");
+      expect(results[1].id).toBe("srv__b");
+    });
+
+    it("passes custom limit to each query", () => {
+      vi.mocked(store.searchTools).mockReturnValue([]);
+
+      broker.searchToolsMulti(["q1", "q2"], 10);
+
+      expect(store.searchTools).toHaveBeenCalledWith("q1", 10);
+      expect(store.searchTools).toHaveBeenCalledWith("q2", 10);
+    });
+  });
+
   // ── callTools ───────────────────────────────────────
 
   describe("callTools", () => {
@@ -163,6 +231,86 @@ describe("Broker", () => {
         { type: "text", text: "r2" },
       ]);
       expect(result.isError).toBeUndefined();
+    });
+
+    it("executes sequentially when sequential option is set", async () => {
+      const callOrder: string[] = [];
+      const mockClient = {
+        callTool: vi.fn().mockImplementation(({ name }: { name: string }) => {
+          callOrder.push(name);
+          return Promise.resolve({ content: [{ type: "text", text: `${name}-result` }] });
+        }),
+      };
+      vi.mocked(pool.getClient).mockReturnValue(mockClient as any);
+
+      const result = await broker.callTools(
+        [
+          { server_name: "srv", tool_name: "step1", arguments: {} },
+          { server_name: "srv", tool_name: "step2", arguments: {} },
+          { server_name: "srv", tool_name: "step3", arguments: {} },
+        ],
+        { sequential: true }
+      );
+
+      // Verify order
+      expect(callOrder).toEqual(["step1", "step2", "step3"]);
+      // Always uses multi-result format with headers
+      expect(result.content).toEqual([
+        { type: "text", text: "[srv/step1]" },
+        { type: "text", text: "step1-result" },
+        { type: "text", text: "[srv/step2]" },
+        { type: "text", text: "step2-result" },
+        { type: "text", text: "[srv/step3]" },
+        { type: "text", text: "step3-result" },
+      ]);
+      expect(result.isError).toBeUndefined();
+    });
+
+    it("sequential mode stops on first error", async () => {
+      const mockClient = {
+        callTool: vi.fn()
+          .mockResolvedValueOnce({ content: [{ type: "text", text: "ok" }] })
+          .mockResolvedValueOnce({ content: [{ type: "text", text: "fail" }], isError: true })
+          .mockResolvedValueOnce({ content: [{ type: "text", text: "never" }] }),
+      };
+      vi.mocked(pool.getClient).mockReturnValue(mockClient as any);
+
+      const result = await broker.callTools(
+        [
+          { server_name: "srv", tool_name: "t1" },
+          { server_name: "srv", tool_name: "t2" },
+          { server_name: "srv", tool_name: "t3" },
+        ],
+        { sequential: true }
+      );
+
+      // Should have called t1 and t2 but not t3
+      expect(mockClient.callTool).toHaveBeenCalledTimes(2);
+      expect(result.content).toEqual([
+        { type: "text", text: "[srv/t1]" },
+        { type: "text", text: "ok" },
+        { type: "text", text: "[srv/t2]" },
+        { type: "text", text: "fail" },
+      ]);
+      expect(result.isError).toBe(true);
+    });
+
+    it("sequential mode uses headers even for single invocation", async () => {
+      const mockClient = {
+        callTool: vi.fn().mockResolvedValue({ content: [{ type: "text", text: "result" }] }),
+      };
+      vi.mocked(pool.getClient).mockReturnValue(mockClient as any);
+
+      const result = await broker.callTools(
+        [{ server_name: "srv", tool_name: "tool", arguments: {} }],
+        { sequential: true }
+      );
+
+      // Sequential always uses header format (unlike parallel which passes through for single)
+      expect(result.content).toEqual([
+        { type: "text", text: "[srv/tool]" },
+        { type: "text", text: "result" },
+      ]);
     });
 
     it("handles partial failure (one succeeds, one fails)", async () => {
