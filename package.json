@@ -1,7 +1,7 @@
 {
   "name": "mcp-broker",
-  "version": "0.1.1",
-  "description": "One MCP server for all your tools — configure once, use everywhere",
+  "version": "0.1.2",
+  "description": "One MCP server for all your tools — works with any AI client, configure once, use everywhere",
   "type": "module",
   "bin": {
     "mcp-broker": "./dist/index.js"
