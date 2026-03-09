@@ -257,6 +257,28 @@ export class Broker {
     }
   }
 
+  // ── Harvest helper ──────────────────────────────────────
+
+  private async harvestAndStoreAll(
+    servers: Array<{ name: string; entry: McpServerEntry }>,
+    logPrefix?: string,
+  ): Promise<void> {
+    const results = await Promise.allSettled(
+      servers.map(async ({ name, entry }) => {
+        const tools = await harvestTools(entry.command, entry.args, entry.env);
+        return { name, tools };
+      })
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        this.store.upsertTools(r.value.name, r.value.tools);
+        if (logPrefix) logger.info(`${logPrefix}: updated tools for "${r.value.name}"`);
+      } else {
+        logger.error(`${logPrefix ?? "Harvest"} failed: ${getErrorMessage(r.reason)}`);
+      }
+    }
+  }
+
   // ── Lifecycle ─────────────────────────────────────────
 
   async startup(): Promise<void> {
@@ -296,19 +318,7 @@ export class Broker {
 
     // Harvest tools in parallel for servers not already indexed
     const toHarvest = entries.filter(({ name }) => this.store.getToolCount(name) === 0);
-    const harvestResults = await Promise.allSettled(
-      toHarvest.map(async ({ name, entry }) => {
-        const tools = await harvestTools(entry.command, entry.args, entry.env);
-        return { name, tools };
-      })
-    );
-    for (const r of harvestResults) {
-      if (r.status === "fulfilled") {
-        this.store.upsertTools(r.value.name, r.value.tools);
-      } else {
-        logger.error(`Failed to harvest tools during startup: ${getErrorMessage(r.reason)}`);
-      }
-    }
+    await this.harvestAndStoreAll(toHarvest, "Startup");
 
     // Connect pool to all servers
     const allServers = this.store.listServers();
@@ -334,20 +344,7 @@ export class Broker {
     if (stale.length === 0) return;
     logger.info(`Background refresh: re-harvesting ${stale.length} stale server(s)`);
 
-    const results = await Promise.allSettled(
-      stale.map(async ({ name, entry }) => {
-        const tools = await harvestTools(entry.command, entry.args, entry.env);
-        return { name, tools };
-      })
-    );
-    for (const r of results) {
-      if (r.status === "fulfilled") {
-        this.store.upsertTools(r.value.name, r.value.tools);
-        logger.info(`Background refresh: updated tools for "${r.value.name}"`);
-      } else {
-        logger.error(`Background refresh failed: ${getErrorMessage(r.reason)}`);
-      }
-    }
+    await this.harvestAndStoreAll(stale, "Background refresh");
   }
 
   async shutdown(): Promise<void> {

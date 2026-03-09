@@ -148,9 +148,9 @@ A task requiring 5 parallel tool calls with 100 registered tools:
 
 ## Prompt Caching Impact
 
-The raw token savings above assume full-price input tokens on every turn. In practice, both Anthropic and OpenAI cache repeated system prompt content (including tool schemas) across turns within a conversation, at a 90% discount (you pay only 10% of the full input price for cached tokens).
+The raw token savings above assume full-price input tokens on every turn. Some providers (notably Anthropic and OpenAI) cache repeated system prompt content (including tool schemas) across turns within a conversation, at up to a 90% discount. Not all providers or models support prompt caching — if yours doesn't, the full savings above apply directly.
 
-Since tool schemas are identical across turns, they hit the cache after the first turn. This significantly reduces the effective per-turn cost of direct tool schemas.
+For providers that do cache, tool schemas hit the cache after the first turn, significantly reducing the effective per-turn cost of direct tool schemas.
 
 ### Adjusted savings with prompt caching
 
@@ -215,24 +215,10 @@ The LLM sends one call:
 search_tools(queries: ["browser navigate", "browser title", "browser close"])  → 1 turn
 ```
 
-### E2E Cost Comparison
-
-Tested with vibium (81 browser automation tools) on Claude Code — navigate to https://example.com, get the page title, close the browser. Each run uses a fully isolated temp directory with no shared MCP configs, ensuring the direct run has zero broker overhead and the broker run has a fresh instance.
-
-| | Turns | Tool calls | Cost |
-|---|---|---|---|
-| **Direct MCP** (81 tool schemas every turn) | 6 | 4 separate calls | $0.0950 |
-| **mcp-broker** (7 meta-tools + multi-query search) | 4 | 1 search + 1 batched call | **$0.0708** |
-| **Savings** | | | **25.5%** |
-
-The broker achieved fewer turns despite prompt caching helping direct MCP. Multi-query search found all needed tools in one call, then `call_tools` executed the entire workflow (navigate → get_title → stop) in a single batched turn.
-
-**Why this matters:** Even in a short 4-6 turn conversation with prompt caching active, the broker is 25% cheaper than direct MCP with 81 tools. The savings come from turn elimination (fewer API round-trips = less conversation history re-sent), not just schema reduction. In longer conversations the advantage compounds.
-
 ## Key Takeaways
 
-1. **Schema overhead dominates (without caching)** — tool schemas are the largest hidden cost in MCP conversations
-2. **Prompt caching changes the math** — with Anthropic/OpenAI caching (90% discount), repeated tool schemas cost 10% of full price, reducing the broker's raw token savings
+1. **Schema overhead dominates (without caching)** — tool schemas are the largest hidden cost in MCP conversations. If your provider doesn't support prompt caching, the full savings apply.
+2. **Prompt caching narrows the gap** — providers that support it (Anthropic, OpenAI) discount repeated schemas up to 90%, reducing the broker's raw token savings
 3. **Multi-query search reduces turns** — searching for multiple aspects at once eliminates repeat `search_tools` calls, which is the main broker overhead
 4. **Batch calling amplifies savings** — parallelizing N calls into 1 turn eliminates (N-1) turns of overhead (conversation history is not cacheable)
 5. **More tools = more savings** — the broker's fixed cost is amortized across more tools

@@ -11,6 +11,16 @@ import { Broker, type ToolInvocation, type ServerUpdate } from "./broker.js";
 import { logger } from "./logger.js";
 import { VERSION, SERVER_NAME, DEFAULT_SEARCH_LIMIT, getErrorMessage } from "./config.js";
 
+// ── Response helpers ────────────────────────────────────
+
+function errorResult(text: string): CallToolResult {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+function textResult(text: string): CallToolResult {
+  return { content: [{ type: "text", text }] };
+}
+
 // ── Meta-tool definitions (always visible) ─────────────
 
 export const META_TOOLS: Tool[] = [
@@ -265,13 +275,13 @@ export async function handleMetaTool(
       const queries = args.queries as string[] | undefined;
 
       if (query && queries) {
-        return { content: [{ type: "text", text: "Error: provide either 'query' or 'queries', not both" }], isError: true };
+        return errorResult("Error: provide either 'query' or 'queries', not both");
       }
       if (!query && !queries) {
-        return { content: [{ type: "text", text: "Error: 'query' or 'queries' is required" }], isError: true };
+        return errorResult("Error: 'query' or 'queries' is required");
       }
       if (queries && queries.length === 0) {
-        return { content: [{ type: "text", text: "Error: 'queries' must be a non-empty array" }], isError: true };
+        return errorResult("Error: 'queries' must be a non-empty array");
       }
 
       const limit = args.limit as number | undefined;
@@ -282,14 +292,7 @@ export async function handleMetaTool(
 
       if (results.length === 0) {
         const searchDesc = isMulti ? `[${queries.join(", ")}]` : `"${query}"`;
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No tools found matching ${searchDesc}. Try different keywords, or call list_mcp_servers to browse available servers.`,
-            },
-          ],
-        };
+        return textResult(`No tools found matching ${searchDesc}. Try different keywords, or call list_mcp_servers to browse available servers.`);
       }
 
       // Build response with schemas so the LLM can use call_tools
@@ -309,24 +312,14 @@ export async function handleMetaTool(
         ? `\n\nShowing top ${results.length} results (more may exist — refine your query or increase limit). Use call_tools with server_name and tool_name to invoke.`
         : "\n\nUse call_tools with server_name and tool_name to invoke.";
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: header + lines.join("\n\n") + footer,
-          },
-        ],
-      };
+      return textResult(header + lines.join("\n\n") + footer);
     }
 
     case "add_mcp_server": {
       const serverName = args.name as string;
       const command = args.command as string;
       if (!serverName || !command) {
-        return {
-          content: [{ type: "text", text: "Error: 'name' and 'command' are required" }],
-          isError: true,
-        };
+        return errorResult("Error: 'name' and 'command' are required");
       }
       try {
         const { toolCount } = await broker.addServer({
@@ -335,74 +328,40 @@ export async function handleMetaTool(
           args: (args.args as string[]) ?? [],
           env: args.env as Record<string, string> | undefined,
         });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Added server "${serverName}" with ${toolCount} tools.`,
-            },
-          ],
-        };
+        return textResult(`Added server "${serverName}" with ${toolCount} tools.`);
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Failed to add server "${serverName}": ${getErrorMessage(err)}`,
-            },
-          ],
-          isError: true,
-        };
+        return errorResult(`Failed to add server "${serverName}": ${getErrorMessage(err)}`);
       }
     }
 
     case "remove_mcp_server": {
       const serverName = args.name as string;
       if (!serverName) {
-        return { content: [{ type: "text", text: "Error: 'name' is required" }], isError: true };
+        return errorResult("Error: 'name' is required");
       }
       await broker.removeServer(serverName);
-      return {
-        content: [{ type: "text", text: `Removed server "${serverName}" and all its tools.` }],
-      };
+      return textResult(`Removed server "${serverName}" and all its tools.`);
     }
 
     case "list_mcp_servers": {
       const servers = broker.listServers();
       if (servers.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No servers registered. Use add_mcp_server or run `mcp-broker import <config-path>` to add servers.",
-            },
-          ],
-        };
+        return textResult("No servers registered. Use add_mcp_server or run `mcp-broker import <config-path>` to add servers.");
       }
       const lines = servers.map(
         (s) => `- **${s.name}**: ${s.toolCount} tools | ${s.connected ? "connected" : "disconnected"}`
       );
-      return {
-        content: [
-          {
-            type: "text",
-            text: lines.join("\n") + "\n\nTo find and call specific tools, use search_tools with a keyword.",
-          },
-        ],
-      };
+      return textResult(lines.join("\n") + "\n\nTo find and call specific tools, use search_tools with a keyword.");
     }
 
     case "get_mcp_server": {
       const serverName = args.name as string;
       if (!serverName) {
-        return { content: [{ type: "text", text: "Error: 'name' is required" }], isError: true };
+        return errorResult("Error: 'name' is required");
       }
       const server = broker.getServer(serverName);
       if (!server) {
-        return {
-          content: [{ type: "text", text: `Server "${serverName}" not found.` }],
-          isError: true,
-        };
+        return errorResult(`Server "${serverName}" not found.`);
       }
 
       const envKeys = server.env ? Object.keys(server.env) : [];
@@ -426,22 +385,16 @@ export async function handleMetaTool(
       } else {
         lines.push("  (no tools indexed)");
       }
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              lines.join("\n") +
-              "\n\nUse search_tools with a tool name above to get its input schema, then call_tools to invoke it.",
-          },
-        ],
-      };
+      return textResult(
+        lines.join("\n") +
+        "\n\nUse search_tools with a tool name above to get its input schema, then call_tools to invoke it.",
+      );
     }
 
     case "update_mcp_server": {
       const serverName = args.name as string;
       if (!serverName) {
-        return { content: [{ type: "text", text: "Error: 'name' is required" }], isError: true };
+        return errorResult("Error: 'name' is required");
       }
 
       const updates: ServerUpdate = {};
@@ -451,33 +404,15 @@ export async function handleMetaTool(
       if (args.env !== undefined) { updates.env = args.env as Record<string, string>; hasUpdates = true; }
 
       if (!hasUpdates) {
-        return {
-          content: [{ type: "text", text: "Error: at least one field (command, args, env) must be provided" }],
-          isError: true,
-        };
+        return errorResult("Error: at least one field (command, args, env) must be provided");
       }
 
       try {
         const { toolCount } = await broker.updateServer(serverName, updates);
         const changedFields = Object.keys(updates).join(", ");
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Updated server "${serverName}" (changed: ${changedFields}). ${toolCount} tools indexed.`,
-            },
-          ],
-        };
+        return textResult(`Updated server "${serverName}" (changed: ${changedFields}). ${toolCount} tools indexed.`);
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Failed to update server "${serverName}": ${getErrorMessage(err)}`,
-            },
-          ],
-          isError: true,
-        };
+        return errorResult(`Failed to update server "${serverName}": ${getErrorMessage(err)}`);
       }
     }
 
@@ -488,10 +423,7 @@ export async function handleMetaTool(
         invocations = [{ server_name: args.server_name as string, tool_name: args.tool_name as string, arguments: args.arguments as Record<string, unknown> }];
       }
       if (!Array.isArray(invocations) || invocations.length === 0) {
-        return {
-          content: [{ type: "text", text: "Error: 'invocations' must be a non-empty array" }],
-          isError: true,
-        };
+        return errorResult("Error: 'invocations' must be a non-empty array");
       }
       const sequential = args.sequential as boolean | undefined;
       return broker.callTools(invocations, sequential ? { sequential } : undefined);

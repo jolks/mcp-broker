@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Store } from "../src/store.js";
 import type { Registry } from "../src/registry.js";
+import { makeStore, makeRegistry } from "./helpers.js";
 
 // Mock harvester
 vi.mock("../src/harvester.js", () => ({
@@ -14,30 +15,6 @@ import { harvestTools } from "../src/harvester.js";
 import { setupFromConfig } from "../src/setup.js";
 
 const mockHarvestTools = vi.mocked(harvestTools);
-
-function makeStore(): Store {
-  return {
-    searchTools: vi.fn(),
-    upsertServer: vi.fn(),
-    upsertTools: vi.fn(),
-    getServer: vi.fn(),
-    listServers: vi.fn(() => []),
-    removeServer: vi.fn(),
-    getToolCount: vi.fn(() => 0),
-    getToolsForServer: vi.fn(() => []),
-    close: vi.fn(),
-  } as unknown as Store;
-}
-
-function makeRegistry(): Registry {
-  return {
-    read: vi.fn(() => ({ mcpServers: {} })),
-    addServer: vi.fn(),
-    removeServer: vi.fn(),
-    listEntries: vi.fn(() => []),
-    importServers: vi.fn(),
-  } as unknown as Registry;
-}
 
 describe("setupFromConfig", () => {
   let store: Store;

@@ -82,15 +82,15 @@ export class Pool {
     return entry.client.getServerVersion();
   }
 
-  async disconnectServer(name: string): Promise<void> {
-    // Cancel any pending reconnect (even if entry already removed by onclose)
+  private clearReconnectState(name: string): void {
     this.reconnectPending.delete(name);
     this.reconnectAttempts.delete(name);
     const timer = this.reconnectTimers.get(name);
-    if (timer) {
-      clearTimeout(timer);
-      this.reconnectTimers.delete(name);
-    }
+    if (timer) { clearTimeout(timer); this.reconnectTimers.delete(name); }
+  }
+
+  async disconnectServer(name: string): Promise<void> {
+    this.clearReconnectState(name);
 
     const entry = this.entries.get(name);
     if (!entry) return;
@@ -122,7 +122,7 @@ export class Pool {
       logger.error(
         `Giving up reconnecting to "${server.name}" after ${MAX_RECONNECT_ATTEMPTS} attempts`
       );
-      this.reconnectAttempts.delete(server.name);
+      this.clearReconnectState(server.name);
       return;
     }
 

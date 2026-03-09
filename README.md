@@ -127,19 +127,7 @@ mcp-broker replaces all your tool schemas with 7 fixed meta-tool schemas (~1,400
 
 Break-even is ~14 tools. Below that, direct configuration is simpler.
 
-### Real-world E2E cost comparison
-
-Tested with vibium (81 browser automation tools) on Claude Code — navigate to a page, get the title, close the browser. Each run is fully isolated in its own temp directory with no shared MCP configs:
-
-| | Turns | Tool calls | Cost |
-|---|---|---|---|
-| **Direct MCP** (81 tool schemas every turn) | 6 | 4 separate calls | $0.0950 |
-| **mcp-broker** (7 meta-tool schemas + multi-query search) | 4 | 1 search + 1 batched call | **$0.0708** |
-| **Savings** | | | **25.5%** |
-
-The broker's multi-query `search_tools` found all needed tools in one call (`["browser navigate", "page title", "browser close"]`), then `call_tools` executed the entire workflow (navigate → get_title → stop) in a single batched call. Fewer turns = less token overhead, even with prompt caching.
-
-**Prompt caching note:** Anthropic and OpenAI both cache repeated system prompt content (including tool schemas) at a 90% discount on subsequent turns. This reduces the effective per-turn cost of direct tool schemas, but the broker's turn-elimination advantage (batching multiple tool calls into one turn) compounds on top of caching savings. The broker's additional advantages include tool selection accuracy (fewer tools = less LLM confusion) and centralized multi-client management. See [Token Savings Analysis](docs/token-savings.md) for the full breakdown.
+**Prompt caching note:** Some providers (Anthropic, OpenAI) cache repeated tool schemas at a discount on subsequent turns, which reduces direct MCP's per-turn cost. The broker still saves by eliminating turns entirely (batching multiple tool calls into one). See [Token Savings Analysis](docs/token-savings.md) for the full breakdown including the impact of prompt caching.
 
 ## Requirements
 

@@ -39,6 +39,10 @@ export function backupConfig(configPath: string): string {
   return backupPath;
 }
 
+function readConfigOrDefault(configPath: string): McpConfig {
+  try { return readConfig(configPath); } catch { return {}; }
+}
+
 export function buildBrokerEntry(): McpServerEntry {
   const brokerHome = process.env.MCP_BROKER_HOME;
   if (brokerHome) {
@@ -52,13 +56,7 @@ export function buildBrokerEntry(): McpServerEntry {
 }
 
 export function rewriteConfigForBroker(configPath: string): void {
-  // Read existing config to preserve non-mcpServers keys
-  let existing: McpConfig = {};
-  try {
-    existing = readConfig(configPath);
-  } catch {
-    // File might not exist yet
-  }
+  const existing = readConfigOrDefault(configPath);
 
   const newConfig: McpConfig = {
     ...existing,
@@ -150,13 +148,7 @@ export function hasBrokerEntry(configPath: string): boolean {
 }
 
 export function addBrokerToConfig(configPath: string): void {
-  let existing: McpConfig = {};
-  try {
-    existing = readConfig(configPath);
-  } catch {
-    // File might not exist yet — start fresh
-  }
-
+  const existing = readConfigOrDefault(configPath);
   const servers = existing.mcpServers ?? {};
   if (SERVER_NAME in servers) return; // Already present
 

@@ -129,12 +129,11 @@ export class Store {
 
   removeServer(name: string): void {
     // Must delete from FTS explicitly (CASCADE doesn't apply to virtual tables)
-    const txn = this.db.transaction(() => {
+    this.runInTransaction(() => {
       this.db.prepare("DELETE FROM tools_fts WHERE server_name = ?").run(name);
       this.db.prepare("DELETE FROM tools WHERE server_name = ?").run(name);
       this.db.prepare("DELETE FROM servers WHERE name = ?").run(name);
     });
-    txn();
   }
 
   private rowToServer(row: Record<string, unknown>): ServerRecord {
@@ -149,7 +148,7 @@ export class Store {
   // ── Tools ────────────────────────────────────────────────
 
   upsertTools(serverName: string, tools: Omit<ToolRecord, "id" | "server_name">[]): void {
-    const txn = this.db.transaction(() => {
+    this.runInTransaction(() => {
       // Remove old tools for this server
       this.db.prepare("DELETE FROM tools_fts WHERE server_name = ?").run(serverName);
       this.db.prepare("DELETE FROM tools WHERE server_name = ?").run(serverName);
@@ -176,7 +175,6 @@ export class Store {
         insertFts.run(params);
       }
     });
-    txn();
     logger.info(`Indexed ${tools.length} tools for server "${serverName}"`);
   }
 

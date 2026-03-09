@@ -3,7 +3,7 @@ import { Broker } from "../src/broker.js";
 import type { Store, SearchResult } from "../src/store.js";
 import type { Pool } from "../src/pool.js";
 import type { Registry } from "../src/registry.js";
-import { makeServer } from "./helpers.js";
+import { makeServer, makeStore, makePool, makeRegistry } from "./helpers.js";
 
 // Mock harvester
 vi.mock("../src/harvester.js", () => ({
@@ -12,45 +12,6 @@ vi.mock("../src/harvester.js", () => ({
 
 import { harvestTools } from "../src/harvester.js";
 const mockHarvestTools = vi.mocked(harvestTools);
-
-function makeStore(): Store {
-  return {
-    searchTools: vi.fn(),
-    upsertServer: vi.fn(),
-    upsertTools: vi.fn(),
-    getServer: vi.fn(),
-    listServers: vi.fn(() => []),
-    removeServer: vi.fn(),
-    getToolCount: vi.fn(() => 0),
-    getToolsForServer: vi.fn(() => []),
-    getLastHarvestedAt: vi.fn(() => undefined),
-    runInTransaction: vi.fn((fn: () => void) => fn()),
-    close: vi.fn(),
-  } as unknown as Store;
-}
-
-function makePool(): Pool {
-  return {
-    getClient: vi.fn(),
-    isConnected: vi.fn(() => false),
-    connectServer: vi.fn(),
-    connectAll: vi.fn(),
-    disconnectServer: vi.fn(),
-    closeAll: vi.fn(),
-    getServerVersion: vi.fn(() => undefined),
-  } as unknown as Pool;
-}
-
-function makeRegistry(): Registry {
-  return {
-    read: vi.fn(() => ({ mcpServers: {} })),
-    addServer: vi.fn(),
-    removeServer: vi.fn(),
-    getEntry: vi.fn(),
-    listEntries: vi.fn(() => []),
-    importServers: vi.fn(),
-  } as unknown as Registry;
-}
 
 describe("Broker", () => {
   let store: Store;

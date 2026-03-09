@@ -33,6 +33,13 @@ async function promptForConfigPath(rl: Interface): Promise<string> {
   return trimmed;
 }
 
+function countServers(path: string): number {
+  try {
+    const cfg = readConfig(path);
+    return Object.keys(cfg.mcpServers ?? {}).filter((n) => n !== SERVER_NAME).length;
+  } catch { return 0; }
+}
+
 const program = new Command();
 
 program
@@ -89,23 +96,13 @@ program
         resolvedPath = detected[0].path;
         selectedClientName = detected[0].clientName;
 
-        // Count servers for display
-        let serverCount = 0;
-        try {
-          const cfg = readConfig(resolvedPath);
-          serverCount = Object.keys(cfg.mcpServers ?? {}).filter((n) => n !== SERVER_NAME).length;
-        } catch { /* ignore */ }
-
+        const serverCount = countServers(resolvedPath);
         console.log(`Found config: ${detected[0].clientName} — ${detected[0].path} (${serverCount} server${serverCount !== 1 ? "s" : ""})\n`);
       } else {
         console.log("Which config should become your centralized server registry?\n");
         for (let i = 0; i < detected.length; i++) {
-          let serverCount = 0;
-          try {
-            const cfg = readConfig(detected[i].path);
-            serverCount = Object.keys(cfg.mcpServers ?? {}).filter((n) => n !== SERVER_NAME).length;
-          } catch { /* ignore */ }
-          console.log(`  ${i + 1}. ${detected[i].clientName} — ${detected[i].path} (${serverCount} server${serverCount !== 1 ? "s" : ""})`);
+          const sc = countServers(detected[i].path);
+          console.log(`  ${i + 1}. ${detected[i].clientName} — ${detected[i].path} (${sc} server${sc !== 1 ? "s" : ""})`);
         }
         const customOptionNum = detected.length + 1;
         console.log(`  ${customOptionNum}. Enter custom path`);
