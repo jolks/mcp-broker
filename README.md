@@ -1,6 +1,6 @@
 # mcp-broker
 
-**One MCP server for all your tools — configure once, use everywhere.**
+**One MCP server for all your tools — works with any AI client, configure once, use everywhere.**
 
 Configure one MCP server instead of dozens. mcp-broker acts as a single gateway to all your MCP servers, centralizing access across every AI tool on your device.
 
@@ -12,7 +12,7 @@ Configure one MCP server instead of dozens. mcp-broker acts as a single gateway 
 
 ## How mcp-broker Solves It
 
-mcp-broker maintains a single `servers.json` registry. Any AI client that connects to mcp-broker gets access to all your MCP servers. Set up once, add mcp-broker to each client, done.
+mcp-broker maintains a single `servers.json` registry. Any AI client that connects to mcp-broker gets access to all your MCP servers. Set up once, add mcp-broker to each client, done. Because it speaks standard MCP, it works with any AI client or LLM that supports the protocol — no vendor lock-in.
 
 Instead of exposing all tools, mcp-broker exposes **8 meta-tools**. The LLM searches for relevant tools on-demand via FTS5 full-text search, then calls them through the broker:
 
@@ -94,7 +94,7 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 ┌─────────────┐      ┌─────────────┐      ┌──────────────────┐
 │  LLM client │◄────►│  mcp-broker │◄────►│  GitHub server   │
 │             │ MCP  │             │ MCP  │  Filesystem srv  │
-│             │stdio │  SQLite DB  │stdio │  Slack server    │
+│             │      │  SQLite DB  │      │  Slack server    │
 │             │      │  FTS5 index │      │  ...             │
 └─────────────┘      └─────────────┘      └──────────────────┘
 ```
@@ -107,7 +107,7 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 ## CLI Commands
 
 ```bash
-npx mcp-broker serve              # Start the MCP server (stdio)
+npx mcp-broker serve              # Start the MCP server
 npx mcp-broker setup [path]       # Import servers, health-check, configure AI tools
 npx mcp-broker list               # Show registered servers and tool counts
 npx mcp-broker refresh [name]     # Re-harvest tools from servers
