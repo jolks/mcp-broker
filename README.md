@@ -84,7 +84,7 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 | `add_mcp_server` | Register a new MCP server. Harvests and indexes its tools. |
 | `remove_mcp_server` | Remove a server and its indexed tools. |
 | `list_mcp_servers` | List all servers with connection status and tool counts. Guides toward search_tools when search returns no results. |
-| `get_mcp_server` | Get detailed info for a server including all tool names. Guides toward search_tools for schema lookup. |
+| `get_mcp_server` | Get detailed info for a server including version, all tool names. Guides toward search_tools for schema lookup. |
 | `update_mcp_server` | Update a server's config (command, args, env). Re-harvests and reconnects. |
 | `refresh_tools` | Re-harvest tools from one or all servers. |
 
@@ -100,7 +100,7 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 ```
 
 - **Registry** — `servers.json` is the source of truth. SQLite is a rebuildable index — delete the DB and it's rebuilt on next startup.
-- **Store** — SQLite + FTS5 with Porter stemming for fast full-text search.
+- **Store** — SQLite + FTS5 with Porter stemming for fast full-text search. On startup, servers with tools older than 5 minutes are re-harvested in the background (non-blocking). Since startup only runs when the LLM client spawns the process, mid-session tool changes require a manual `refresh_tools` call.
 - **Pool** — Eager connection manager with auto-reconnect.
 - **Harvester** — Discovers tools from a server via `tools/list` with pagination.
 
