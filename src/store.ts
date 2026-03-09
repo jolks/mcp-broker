@@ -193,6 +193,13 @@ export class Store {
       .all(serverName) as ToolSummary[];
   }
 
+  getLastHarvestedAt(serverName: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT harvested_at FROM tools WHERE server_name = ? ORDER BY harvested_at DESC LIMIT 1")
+      .get(serverName) as { harvested_at: string } | undefined;
+    return row?.harvested_at;
+  }
+
   // ── FTS5 Search ──────────────────────────────────────────
 
   searchTools(query: string, limit: number = 20): SearchResult[] {

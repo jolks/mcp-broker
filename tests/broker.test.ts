@@ -23,6 +23,7 @@ function makeStore(): Store {
     removeServer: vi.fn(),
     getToolCount: vi.fn(() => 0),
     getToolsForServer: vi.fn(() => []),
+    getLastHarvestedAt: vi.fn(() => undefined),
     runInTransaction: vi.fn((fn: () => void) => fn()),
     close: vi.fn(),
   } as unknown as Store;
@@ -36,6 +37,7 @@ function makePool(): Pool {
     connectAll: vi.fn(),
     disconnectServer: vi.fn(),
     closeAll: vi.fn(),
+    getServerVersion: vi.fn(() => undefined),
   } as unknown as Pool;
 }
 
@@ -297,6 +299,28 @@ describe("Broker", () => {
       vi.mocked(store.getServer).mockReturnValue(undefined);
       expect(broker.getServer("missing")).toBeUndefined();
     });
+
+    it("includes version when pool provides it", () => {
+      vi.mocked(store.getServer).mockReturnValue(makeServer({ name: "srv" }));
+      vi.mocked(pool.isConnected).mockReturnValue(true);
+      vi.mocked(store.getToolCount).mockReturnValue(1);
+      vi.mocked(store.getToolsForServer).mockReturnValue([]);
+      vi.mocked(pool.getServerVersion).mockReturnValue({ name: "srv", version: "1.2.3" });
+
+      const result = broker.getServer("srv");
+      expect(result?.version).toBe("1.2.3");
+    });
+
+    it("omits version when pool returns undefined", () => {
+      vi.mocked(store.getServer).mockReturnValue(makeServer({ name: "srv" }));
+      vi.mocked(pool.isConnected).mockReturnValue(true);
+      vi.mocked(store.getToolCount).mockReturnValue(1);
+      vi.mocked(store.getToolsForServer).mockReturnValue([]);
+      vi.mocked(pool.getServerVersion).mockReturnValue(undefined);
+
+      const result = broker.getServer("srv");
+      expect(result?.version).toBeUndefined();
+    });
   });
 
   // ── updateServer ─────────────────────────────────────
@@ -444,13 +468,16 @@ describe("Broker", () => {
     });
 
     it("startup skips harvesting when tools already indexed", async () => {
+      const recentTimestamp = new Date().toISOString().replace("Z", "").replace("T", " ");
       vi.mocked(registry.listEntries).mockReturnValue([
         { name: "a", entry: { command: "cmd-a", args: [] } },
       ]);
       vi.mocked(store.listServers).mockReturnValue([]);
       vi.mocked(store.getToolCount).mockReturnValue(5); // already has tools
+      vi.mocked(store.getLastHarvestedAt).mockReturnValue(recentTimestamp);
 
       await broker.startup();
+      await broker.shutdown();
 
       expect(mockHarvestTools).not.toHaveBeenCalled();
     });
@@ -475,6 +502,89 @@ describe("Broker", () => {
       await broker.shutdown();
       expect(pool.closeAll).toHaveBeenCalled();
       expect(store.close).toHaveBeenCalled();
+    });
+
+    it("startup triggers background refresh for stale servers", async () => {
+      const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace("Z", "").replace("T", " ");
+      vi.mocked(registry.listEntries).mockReturnValue([
+        { name: "stale-srv", entry: { command: "cmd", args: [] } },
+      ]);
+      vi.mocked(store.listServers)
+        .mockReturnValueOnce([])
+        .mockReturnValue([makeServer({ name: "stale-srv", command: "cmd", args: [] })]);
+      vi.mocked(store.getToolCount).mockReturnValue(3); // already indexed
+      vi.mocked(store.getLastHarvestedAt).mockReturnValue(oldTimestamp);
+      mockHarvestTools.mockResolvedValue([
+        { tool_name: "t1", description: "T1", input_schema: "{}" },
+      ]);
+
+      await broker.startup();
+      await broker.shutdown();
+
+      // harvestTools called once during background refresh (not during initial startup since toolCount > 0)
+      expect(mockHarvestTools).toHaveBeenCalledWith("cmd", [], undefined);
+    });
+
+    it("startup skips background refresh for recently harvested servers", async () => {
+      const recentTimestamp = new Date().toISOString().replace("Z", "").replace("T", " ");
+      vi.mocked(registry.listEntries).mockReturnValue([
+        { name: "fresh-srv", entry: { command: "cmd", args: [] } },
+      ]);
+      vi.mocked(store.listServers)
+        .mockReturnValueOnce([])
+        .mockReturnValue([makeServer({ name: "fresh-srv", command: "cmd", args: [] })]);
+      vi.mocked(store.getToolCount).mockReturnValue(3);
+      vi.mocked(store.getLastHarvestedAt).mockReturnValue(recentTimestamp);
+
+      await broker.startup();
+      await broker.shutdown();
+
+      expect(mockHarvestTools).not.toHaveBeenCalled();
+    });
+
+    it("background refresh failure does not crash", async () => {
+      const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace("Z", "").replace("T", " ");
+      vi.mocked(registry.listEntries).mockReturnValue([
+        { name: "fail-srv", entry: { command: "cmd", args: [] } },
+      ]);
+      vi.mocked(store.listServers)
+        .mockReturnValueOnce([])
+        .mockReturnValue([makeServer({ name: "fail-srv", command: "cmd", args: [] })]);
+      vi.mocked(store.getToolCount).mockReturnValue(2);
+      vi.mocked(store.getLastHarvestedAt).mockReturnValue(oldTimestamp);
+      mockHarvestTools.mockRejectedValue(new Error("harvest exploded"));
+
+      // Should not throw
+      await broker.startup();
+      await broker.shutdown();
+    });
+
+    it("shutdown awaits background refresh", async () => {
+      const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace("Z", "").replace("T", " ");
+      vi.mocked(registry.listEntries).mockReturnValue([
+        { name: "srv", entry: { command: "cmd", args: [] } },
+      ]);
+      vi.mocked(store.listServers)
+        .mockReturnValueOnce([])
+        .mockReturnValue([makeServer({ name: "srv", command: "cmd", args: [] })]);
+      vi.mocked(store.getToolCount).mockReturnValue(1);
+      vi.mocked(store.getLastHarvestedAt).mockReturnValue(oldTimestamp);
+
+      let harvestResolved = false;
+      mockHarvestTools.mockImplementation(
+        () => new Promise((resolve) => {
+          setTimeout(() => {
+            harvestResolved = true;
+            resolve([{ tool_name: "t", description: "T", input_schema: "{}" }]);
+          }, 50);
+        })
+      );
+
+      await broker.startup();
+      await broker.shutdown();
+
+      // shutdown should have waited for the background harvest
+      expect(harvestResolved).toBe(true);
     });
   });
 });

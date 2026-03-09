@@ -42,6 +42,10 @@ export const INITIAL_RECONNECT_DELAY_MS = 5_000;
 export const MAX_RECONNECT_DELAY_MS = 300_000; // 5 minutes
 export const MAX_RECONNECT_ATTEMPTS = 10;
 
+// ── Background refresh ──────────────────────────────────
+
+export const BACKGROUND_REFRESH_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 // ── Search ──────────────────────────────────────────────
 
 export const DEFAULT_SEARCH_LIMIT = 20;

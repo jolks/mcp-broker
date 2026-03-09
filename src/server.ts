@@ -395,9 +395,14 @@ export async function handleMetaTool(
         `- Command: \`${server.command}\``,
         `- Args: ${server.args.length > 0 ? server.args.map((a) => `\`${a}\``).join(", ") : "(none)"}`,
         `- Env vars: ${envKeys.length > 0 ? envKeys.join(", ") : "(none)"}`,
+      ];
+      if (server.version) {
+        lines.push(`- Version: ${server.version}`);
+      }
+      lines.push(
         `- Status: ${server.connected ? "connected" : "disconnected"}`,
         `- Tools (${server.toolCount}):`,
-      ];
+      );
       if (server.tools.length > 0) {
         for (const t of server.tools) {
           lines.push(`  - ${t.tool_name}: ${t.description}`);

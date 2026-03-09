@@ -76,6 +76,12 @@ export class Pool {
     return this.entries.has(serverName);
   }
 
+  getServerVersion(name: string): { name: string; version: string } | undefined {
+    const entry = this.entries.get(name);
+    if (!entry) return undefined;
+    return entry.client.getServerVersion();
+  }
+
   async disconnectServer(name: string): Promise<void> {
     // Cancel any pending reconnect (even if entry already removed by onclose)
     this.reconnectPending.delete(name);

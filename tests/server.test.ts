@@ -305,6 +305,37 @@ describe("handleMetaTool", () => {
       expect((result.content[0] as any).text).toContain("not found");
     });
 
+    it("includes version when available", async () => {
+      vi.mocked(broker.getServer).mockReturnValue({
+        name: "srv",
+        command: "node",
+        args: [],
+        connected: true,
+        toolCount: 1,
+        tools: [{ tool_name: "t1", description: "T1" }],
+        version: "2.0.0",
+      });
+
+      const result = await handleMetaTool(broker, "get_mcp_server", { name: "srv" });
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("Version: 2.0.0");
+    });
+
+    it("omits version line when not available", async () => {
+      vi.mocked(broker.getServer).mockReturnValue({
+        name: "srv",
+        command: "node",
+        args: [],
+        connected: true,
+        toolCount: 0,
+        tools: [],
+      });
+
+      const result = await handleMetaTool(broker, "get_mcp_server", { name: "srv" });
+      const text = (result.content[0] as any).text;
+      expect(text).not.toContain("Version:");
+    });
+
     it("shows only env var keys, not values", async () => {
       vi.mocked(broker.getServer).mockReturnValue({
         name: "srv",

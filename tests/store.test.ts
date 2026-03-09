@@ -105,6 +105,21 @@ describe("Store", () => {
       expect(store.getToolsForServer("srv")).toEqual([]);
     });
 
+    it("getLastHarvestedAt returns timestamp for server with tools", () => {
+      store.upsertTools("srv", [
+        { tool_name: "t1", description: "T1", input_schema: "{}" },
+      ]);
+      const ts = store.getLastHarvestedAt("srv");
+      expect(ts).toBeDefined();
+      expect(typeof ts).toBe("string");
+      // Should be a valid ISO-ish datetime
+      expect(new Date(ts! + "Z").getTime()).not.toBeNaN();
+    });
+
+    it("getLastHarvestedAt returns undefined for server with no tools", () => {
+      expect(store.getLastHarvestedAt("srv")).toBeUndefined();
+    });
+
     it("re-upsert replaces old tools", () => {
       store.upsertTools("srv", [
         { tool_name: "old", description: "Old", input_schema: "{}" },

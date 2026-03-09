@@ -4,7 +4,7 @@ import { Pool } from "./pool.js";
 import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
-import { getErrorMessage } from "./config.js";
+import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS } from "./config.js";
 import type { McpServerEntry } from "./client-config.js";
 
 export interface ToolInvocation {
@@ -27,12 +27,14 @@ export interface ServerDetail {
   connected: boolean;
   toolCount: number;
   tools: ToolSummary[];
+  version?: string;
 }
 
 export class Broker {
   private store: Store;
   private pool: Pool;
   private registry: Registry;
+  private backgroundRefreshPromise: Promise<void> | null = null;
 
   constructor(store: Store, pool: Pool, registry: Registry) {
     this.store = store;
@@ -169,6 +171,7 @@ export class Broker {
       connected: this.pool.isConnected(server.name),
       toolCount: this.store.getToolCount(server.name),
       tools: this.store.getToolsForServer(server.name),
+      version: this.pool.getServerVersion(server.name)?.version,
     };
   }
 
@@ -277,9 +280,46 @@ export class Broker {
     const allServers = this.store.listServers();
     logger.info(`Starting pool with ${allServers.length} servers`);
     await this.pool.connectAll(allServers);
+
+    // Fire background refresh for stale servers (non-blocking)
+    this.backgroundRefreshPromise = this.backgroundRefresh();
+  }
+
+  private async backgroundRefresh(): Promise<void> {
+    const entries = this.registry.listEntries();
+    const now = Date.now();
+
+    const stale = entries.filter(({ name }) => {
+      if (this.store.getToolCount(name) === 0) return false;
+      const harvestedAt = this.store.getLastHarvestedAt(name);
+      if (!harvestedAt) return true;
+      const age = now - new Date(harvestedAt + "Z").getTime();
+      return age > BACKGROUND_REFRESH_TTL_MS;
+    });
+
+    if (stale.length === 0) return;
+    logger.info(`Background refresh: re-harvesting ${stale.length} stale server(s)`);
+
+    const results = await Promise.allSettled(
+      stale.map(async ({ name, entry }) => {
+        const tools = await harvestTools(entry.command, entry.args, entry.env);
+        return { name, tools };
+      })
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        this.store.upsertTools(r.value.name, r.value.tools);
+        logger.info(`Background refresh: updated tools for "${r.value.name}"`);
+      } else {
+        logger.error(`Background refresh failed: ${getErrorMessage(r.reason)}`);
+      }
+    }
   }
 
   async shutdown(): Promise<void> {
+    if (this.backgroundRefreshPromise) {
+      await this.backgroundRefreshPromise;
+    }
     await this.pool.closeAll();
     this.store.close();
   }
