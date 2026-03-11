@@ -6,7 +6,7 @@ const FIXTURE = resolve(import.meta.dirname, "fixtures/echo-server.ts");
 
 describe("harvestTools (integration)", { timeout: 30_000 }, () => {
   it("discovers tools from echo-server", async () => {
-    const tools = await harvestTools("npx", ["tsx", FIXTURE]);
+    const tools = await harvestTools({ name: "echo", command: "npx", args: ["tsx", FIXTURE] });
 
     expect(tools).toHaveLength(2);
 
@@ -15,7 +15,7 @@ describe("harvestTools (integration)", { timeout: 30_000 }, () => {
   });
 
   it("returns correct tool_name and description", async () => {
-    const tools = await harvestTools("npx", ["tsx", FIXTURE]);
+    const tools = await harvestTools({ name: "echo", command: "npx", args: ["tsx", FIXTURE] });
 
     const echo = tools.find((t) => t.tool_name === "echo")!;
     expect(echo.description).toBe("Returns the input message as-is");
@@ -25,7 +25,7 @@ describe("harvestTools (integration)", { timeout: 30_000 }, () => {
   });
 
   it("returns input_schema as JSON string", async () => {
-    const tools = await harvestTools("npx", ["tsx", FIXTURE]);
+    const tools = await harvestTools({ name: "echo", command: "npx", args: ["tsx", FIXTURE] });
 
     const echo = tools.find((t) => t.tool_name === "echo")!;
     const schema = JSON.parse(echo.input_schema);
@@ -36,7 +36,7 @@ describe("harvestTools (integration)", { timeout: 30_000 }, () => {
 
   it("throws for non-existent command", async () => {
     await expect(
-      harvestTools("__nonexistent_command_abc123__", [])
+      harvestTools({ name: "bad", command: "__nonexistent_command_abc123__", args: [] })
     ).rejects.toThrow();
   });
 });

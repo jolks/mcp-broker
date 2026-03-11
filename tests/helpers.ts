@@ -1,14 +1,22 @@
 import { vi } from "vitest";
-import type { ServerRecord, Store } from "../src/store.js";
+import type { StdioServerRecord, UrlServerRecord, Store } from "../src/store.js";
 import type { Pool } from "../src/pool.js";
 import type { Registry } from "../src/registry.js";
 
-export function makeServer(overrides: Partial<ServerRecord> = {}): ServerRecord {
+export function makeServer(overrides: Partial<StdioServerRecord> = {}): StdioServerRecord {
   return {
     name: "test-server",
     command: "node",
     args: ["server.js"],
     env: undefined,
+    ...overrides,
+  };
+}
+
+export function makeUrlServer(overrides: Partial<UrlServerRecord> = {}): UrlServerRecord {
+  return {
+    name: "test-url-server",
+    url: "http://localhost:3000/mcp",
     ...overrides,
   };
 }

@@ -5,10 +5,21 @@ import { readdirSync } from "node:fs";
 import { logger } from "./logger.js";
 import { backupsDir, SERVER_NAME } from "./config.js";
 
-export interface McpServerEntry {
+export interface StdioServerEntry {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+}
+
+export interface UrlServerEntry {
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServerEntry = StdioServerEntry | UrlServerEntry;
+
+export function isUrlEntry(entry: McpServerEntry): entry is UrlServerEntry {
+  return "url" in entry;
 }
 
 export interface McpConfig {
@@ -43,7 +54,7 @@ function readConfigOrDefault(configPath: string): McpConfig {
   try { return readConfig(configPath); } catch { return {}; }
 }
 
-export function buildBrokerEntry(): McpServerEntry {
+export function buildBrokerEntry(): StdioServerEntry {
   const brokerHome = process.env.MCP_BROKER_HOME;
   if (brokerHome) {
     return {

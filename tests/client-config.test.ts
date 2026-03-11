@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { readConfig, backupConfig, rewriteConfigForBroker, restoreConfig, listKnownConfigPaths, addBrokerToConfig, hasBrokerEntry, buildBrokerEntry } from "../src/client-config.js";
+import { readConfig, backupConfig, rewriteConfigForBroker, restoreConfig, listKnownConfigPaths, addBrokerToConfig, hasBrokerEntry, buildBrokerEntry, isUrlEntry } from "../src/client-config.js";
 
 describe("config", () => {
   let tmpDir: string;
@@ -249,6 +249,20 @@ describe("config", () => {
       delete process.env.MCP_BROKER_HOME;
       const entry = buildBrokerEntry();
       expect(entry).toEqual({ command: "npx", args: ["-y", "mcp-broker", "serve"] });
+    });
+  });
+
+  // ── isUrlEntry ────────────────────────────────────
+
+  describe("isUrlEntry", () => {
+    it("returns true for URL entries", () => {
+      expect(isUrlEntry({ url: "https://example.com/mcp" })).toBe(true);
+      expect(isUrlEntry({ url: "https://example.com/mcp", headers: { Auth: "Bearer tok" } })).toBe(true);
+    });
+
+    it("returns false for stdio entries", () => {
+      expect(isUrlEntry({ command: "npx", args: ["@mcp/github"] })).toBe(false);
+      expect(isUrlEntry({ command: "node" })).toBe(false);
     });
   });
 

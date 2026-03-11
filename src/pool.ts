@@ -1,12 +1,14 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { ServerRecord } from "./store.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { type ServerRecord, isUrlServer } from "./store.js";
+import { createStdioTransport, createUrlTransport } from "./transport.js";
 import { logger } from "./logger.js";
-import { VERSION, SERVER_NAME, CONNECT_TIMEOUT_MS, INITIAL_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_MS, MAX_RECONNECT_ATTEMPTS, buildEnv, raceTimeout } from "./config.js";
+import { VERSION, SERVER_NAME, CONNECT_TIMEOUT_MS, INITIAL_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_MS, MAX_RECONNECT_ATTEMPTS, raceTimeout } from "./config.js";
 
 interface PoolEntry {
   client: Client;
-  transport: StdioClientTransport;
+  transport: Transport;
 }
 
 export class Pool {
@@ -21,12 +23,9 @@ export class Pool {
       return this.entries.get(server.name)!.client;
     }
 
-    const transport = new StdioClientTransport({
-      command: server.command,
-      args: server.args,
-      env: buildEnv(server.env),
-      stderr: "pipe",
-    });
+    const transport = isUrlServer(server)
+      ? await this.connectUrl(server)
+      : createStdioTransport(server);
 
     const client = new Client(
       { name: SERVER_NAME, version: VERSION },
@@ -53,6 +52,23 @@ export class Pool {
     this.entries.set(server.name, { client, transport });
     logger.info(`Connected to server "${server.name}"`);
     return client;
+  }
+
+  /**
+   * Try Streamable HTTP first; on failure fall back to SSE (per MCP spec).
+   * The fallback happens at the connect level since StreamableHTTPClientTransport
+   * may only fail once the client tries to use it.
+   */
+  private async connectUrl(server: import("./store.js").UrlServerRecord): Promise<Transport> {
+    try {
+      return await createUrlTransport(server);
+    } catch {
+      logger.info(`Streamable HTTP failed for "${server.name}", trying SSE`);
+      const url = new URL(server.url);
+      return new SSEClientTransport(url, {
+        requestInit: server.headers ? { headers: server.headers } : undefined,
+      });
+    }
   }
 
   async connectAll(servers: ServerRecord[]): Promise<void> {

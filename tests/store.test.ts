@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Store } from "../src/store.js";
-import { makeServer } from "./helpers.js";
+import { makeServer, makeUrlServer } from "./helpers.js";
 
 describe("Store", () => {
   let store: Store;
@@ -57,6 +57,52 @@ describe("Store", () => {
       store.upsertServer(makeServer({ name: "s1", env: undefined }));
       const got = store.getServer("s1");
       expect(got?.env).toBeUndefined();
+    });
+
+    it("upserts and retrieves a URL server", () => {
+      const server = makeUrlServer();
+      store.upsertServer(server);
+      const got = store.getServer("test-url-server");
+      expect(got).toEqual(server);
+    });
+
+    it("URL server has no command field", () => {
+      store.upsertServer(makeUrlServer());
+      const got = store.getServer("test-url-server");
+      expect(got).toBeDefined();
+      expect("url" in got!).toBe(true);
+      expect("command" in got!).toBe(false);
+    });
+
+    it("URL server stores headers", () => {
+      store.upsertServer(makeUrlServer({ name: "h1", headers: { Authorization: "Bearer tok" } }));
+      const got = store.getServer("h1");
+      expect(got).toBeDefined();
+      expect("url" in got! && got.headers).toEqual({ Authorization: "Bearer tok" });
+    });
+
+    it("URL server with no headers", () => {
+      store.upsertServer(makeUrlServer({ name: "h2" }));
+      const got = store.getServer("h2");
+      expect(got).toBeDefined();
+      expect("url" in got! && got.headers).toBeUndefined();
+    });
+
+    it("lists mixed stdio and URL servers", () => {
+      store.upsertServer(makeServer({ name: "alpha" }));
+      store.upsertServer(makeUrlServer({ name: "beta" }));
+      const servers = store.listServers();
+      expect(servers.map((s) => s.name)).toEqual(["alpha", "beta"]);
+      expect("command" in servers[0]).toBe(true);
+      expect("url" in servers[1]).toBe(true);
+    });
+
+    it("overwriting stdio server with URL server works", () => {
+      store.upsertServer(makeServer({ name: "s1" }));
+      store.upsertServer(makeUrlServer({ name: "s1", url: "http://new.example.com" }));
+      const got = store.getServer("s1");
+      expect("url" in got!).toBe(true);
+      expect("command" in got!).toBe(false);
     });
   });
 

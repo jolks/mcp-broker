@@ -316,7 +316,7 @@ describe("Broker", () => {
         env: server.env,
       });
       expect(store.upsertServer).toHaveBeenCalledWith(server);
-      expect(mockHarvestTools).toHaveBeenCalledWith(server.command, server.args, server.env);
+      expect(mockHarvestTools).toHaveBeenCalledWith(server);
       expect(store.upsertTools).toHaveBeenCalledWith("test-server", [
         { tool_name: "t1", description: "Tool 1", input_schema: "{}" },
         { tool_name: "t2", description: "Tool 2", input_schema: "{}" },
@@ -448,7 +448,7 @@ describe("Broker", () => {
       expect(registry.addServer).toHaveBeenCalledWith("srv", expect.objectContaining({ command: "deno" }));
       expect(store.upsertServer).toHaveBeenCalledWith(expect.objectContaining({ name: "srv", command: "deno" }));
       expect(pool.disconnectServer).toHaveBeenCalledWith("srv");
-      expect(mockHarvestTools).toHaveBeenCalledWith("deno", ["old.js"], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "srv", command: "deno", args: ["old.js"] }));
       expect(store.upsertTools).toHaveBeenCalled();
       expect(pool.connectServer).toHaveBeenCalled();
       expect(result.toolCount).toBe(1);
@@ -491,7 +491,7 @@ describe("Broker", () => {
 
       expect(registry.listEntries).toHaveBeenCalled();
       expect(mockHarvestTools).toHaveBeenCalledTimes(1);
-      expect(mockHarvestTools).toHaveBeenCalledWith("node", ["server.js"], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "srv", command: "node", args: ["server.js"] }));
       expect(store.upsertTools).toHaveBeenCalled();
     });
 
@@ -603,7 +603,7 @@ describe("Broker", () => {
 
       await broker.startup();
 
-      expect(mockHarvestTools).toHaveBeenCalledWith("cmd-a", [], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "a", command: "cmd-a", args: [] }));
       expect(store.upsertTools).toHaveBeenCalled();
     });
 
@@ -631,7 +631,7 @@ describe("Broker", () => {
       await broker.shutdown();
 
       // harvestTools called once during background refresh (not during initial startup since toolCount > 0)
-      expect(mockHarvestTools).toHaveBeenCalledWith("cmd", [], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "stale-srv", command: "cmd", args: [] }));
     });
 
     it("startup skips background refresh for recently harvested servers", async () => {

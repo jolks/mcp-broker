@@ -9,11 +9,23 @@ function prefixToolName(serverName: string, toolName: string): string {
   return `${serverName}${TOOL_PREFIX_SEPARATOR}${toolName}`;
 }
 
-export interface ServerRecord {
+export interface StdioServerRecord {
   name: string;
   command: string;
   args: string[];
   env?: Record<string, string>;
+}
+
+export interface UrlServerRecord {
+  name: string;
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type ServerRecord = StdioServerRecord | UrlServerRecord;
+
+export function isUrlServer(server: ServerRecord): server is UrlServerRecord {
+  return "url" in server;
 }
 
 export interface ToolRecord {
@@ -61,9 +73,11 @@ export class Store {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS servers (
         name TEXT PRIMARY KEY,
-        command TEXT NOT NULL,
+        command TEXT,
         args TEXT NOT NULL DEFAULT '[]',
         env TEXT,
+        url TEXT,
+        headers TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       );
@@ -79,6 +93,9 @@ export class Store {
       );
     `);
 
+    // Migrate existing DBs: add url/headers columns and relax command NOT NULL
+    this.migrateUrlColumns();
+
     // FTS5 virtual table — CREATE VIRTUAL TABLE is not IF NOT EXISTS compatible in all SQLite versions
     const ftsExists = this.db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tools_fts'")
@@ -93,23 +110,69 @@ export class Store {
     }
   }
 
+  private migrateUrlColumns(): void {
+    // Check if url column already exists
+    const columns = this.db.pragma("table_info(servers)") as Array<{ name: string }>;
+    const hasUrl = columns.some((c) => c.name === "url");
+    if (hasUrl) return;
+
+    // Recreate the table to drop NOT NULL from command and add url/headers
+    this.db.exec(`
+      BEGIN;
+      CREATE TABLE servers_new (
+        name TEXT PRIMARY KEY,
+        command TEXT,
+        args TEXT NOT NULL DEFAULT '[]',
+        env TEXT,
+        url TEXT,
+        headers TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT INTO servers_new (name, command, args, env, created_at, updated_at)
+        SELECT name, command, args, env, created_at, updated_at FROM servers;
+      DROP TABLE servers;
+      ALTER TABLE servers_new RENAME TO servers;
+      COMMIT;
+    `);
+    logger.info("Migrated servers table to support URL-based servers");
+  }
+
   // ── Servers ──────────────────────────────────────────────
 
   upsertServer(server: ServerRecord): void {
-    this.db
-      .prepare(
-        `INSERT INTO servers (name, command, args, env, updated_at)
-         VALUES (@name, @command, @args, @env, datetime('now'))
-         ON CONFLICT(name) DO UPDATE SET
-           command = @command, args = @args, env = @env,
-           updated_at = datetime('now')`
-      )
-      .run({
-        name: server.name,
-        command: server.command,
-        args: JSON.stringify(server.args),
-        env: server.env ? JSON.stringify(server.env) : null,
-      });
+    if (isUrlServer(server)) {
+      this.db
+        .prepare(
+          `INSERT INTO servers (name, command, args, env, url, headers, updated_at)
+           VALUES (@name, NULL, '[]', NULL, @url, @headers, datetime('now'))
+           ON CONFLICT(name) DO UPDATE SET
+             command = NULL, args = '[]', env = NULL,
+             url = @url, headers = @headers,
+             updated_at = datetime('now')`
+        )
+        .run({
+          name: server.name,
+          url: server.url,
+          headers: server.headers ? JSON.stringify(server.headers) : null,
+        });
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO servers (name, command, args, env, url, headers, updated_at)
+           VALUES (@name, @command, @args, @env, NULL, NULL, datetime('now'))
+           ON CONFLICT(name) DO UPDATE SET
+             command = @command, args = @args, env = @env,
+             url = NULL, headers = NULL,
+             updated_at = datetime('now')`
+        )
+        .run({
+          name: server.name,
+          command: server.command,
+          args: JSON.stringify(server.args),
+          env: server.env ? JSON.stringify(server.env) : null,
+        });
+    }
   }
 
   getServer(name: string): ServerRecord | undefined {
@@ -137,6 +200,13 @@ export class Store {
   }
 
   private rowToServer(row: Record<string, unknown>): ServerRecord {
+    if (row.url) {
+      return {
+        name: row.name as string,
+        url: row.url as string,
+        headers: row.headers ? JSON.parse(row.headers as string) : undefined,
+      };
+    }
     return {
       name: row.name as string,
       command: row.command as string,

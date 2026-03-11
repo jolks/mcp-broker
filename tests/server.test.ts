@@ -231,12 +231,34 @@ describe("handleMetaTool", () => {
     it("returns error when name is missing", async () => {
       const result = await handleMetaTool(broker, "add_mcp_server", { command: "npx" });
       expect(result.isError).toBe(true);
-      expect((result.content[0] as any).text).toContain("'name' and 'command' are required");
+      expect((result.content[0] as any).text).toContain("'name' is required");
     });
 
-    it("returns error when command is missing", async () => {
+    it("returns error when neither command nor url is provided", async () => {
       const result = await handleMetaTool(broker, "add_mcp_server", { name: "test" });
       expect(result.isError).toBe(true);
+      expect((result.content[0] as any).text).toContain("either 'command' (stdio) or 'url' (SSE/HTTP) is required");
+    });
+
+    it("returns error when both command and url are provided", async () => {
+      const result = await handleMetaTool(broker, "add_mcp_server", { name: "test", command: "npx", url: "https://example.com" });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as any).text).toContain("either 'command' or 'url', not both");
+    });
+
+    it("adds URL-based server successfully", async () => {
+      vi.mocked(broker.addServer).mockResolvedValue({ toolCount: 2 });
+      const result = await handleMetaTool(broker, "add_mcp_server", {
+        name: "remote",
+        url: "https://example.com/mcp",
+        headers: { Authorization: "Bearer tok" },
+      });
+      expect(result.isError).toBeUndefined();
+      expect((result.content[0] as any).text).toContain("remote");
+      expect((result.content[0] as any).text).toContain("2 tools");
+      expect(broker.addServer).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "remote", url: "https://example.com/mcp", headers: { Authorization: "Bearer tok" } })
+      );
     });
 
     it("handles addServer failure", async () => {
