@@ -13,8 +13,8 @@ export interface HarvestedTool {
 }
 
 /**
- * Connect a URL-based server with Streamable HTTP → SSE fallback.
- * Returns the connected client and transport for cleanup.
+ * Connect to a server for harvesting. Stdio servers connect directly;
+ * URL servers use Streamable HTTP → SSE fallback via connectUrl().
  */
 async function connectForHarvest(
   server: ServerRecord,

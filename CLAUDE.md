@@ -47,11 +47,12 @@ LLM → call_tools(invocations: [{server_name: "vibium", tool_name: "browser_nav
 - **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 7 meta-tools with annotations. `search_tools` description is dynamically built with actual server names and tool counts via `buildDynamicTools()`. Response text guides the LLM through a discovery cycle: search → list → get → search again.
 - **broker.ts** — Orchestration layer. Owns search (`searchTools` for single query, `searchToolsMulti` for multi-query with dedup), tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
 - **store.ts** — SQLite + FTS5 via better-sqlite3. Tables: `servers`, `tools`, `tools_fts` (virtual). DB at `$MCP_BROKER_HOME/broker.db`. Porter stemming for search. Acts as a rebuildable index.
-- **pool.ts** — Eager connection manager. Connects to all servers on startup via `StdioClientTransport`. Auto-reconnects on disconnect. `Map<serverName, {client, transport}>`.
-- **harvester.ts** — One-shot tool discovery. Spawns a server, calls `tools/list` with pagination, collects schemas, shuts down. 30s timeout.
+- **transport.ts** — Transport creation and URL connection logic. Exports `createStdioTransport()`, `createStreamableTransport()`, `createSseTransport()`, and `connectUrl()` which handles Streamable HTTP → SSE fallback (per MCP spec). Used by both pool and harvester.
+- **pool.ts** — Eager connection manager. Connects to all servers on startup (stdio via `createStdioTransport`, URL via `connectUrl`). Auto-reconnects on disconnect. `Map<serverName, {client, transport}>`.
+- **harvester.ts** — One-shot tool discovery. `harvestTools(server: ServerRecord)` connects to a server (stdio or URL), calls `tools/list` with pagination, collects schemas, shuts down. 30s timeout.
 - **registry.ts** — Manages `servers.json` (the source of truth for server definitions). Pure standard MCP config format. CRUD operations: addServer, removeServer, listEntries, importServers.
 - **config.ts** — App-wide defaults: identity (`VERSION`, `SERVER_NAME`), path helpers (`brokerHome()`, `dbPath()`, `registryPath()`, `backupsDir()`), permissions (`FILE_PERMISSION`), timeouts, search constants, and utilities (`buildEnv`, `raceTimeout`). Merged from former `paths.ts` and `utils.ts`.
-- **client-config.ts** — Reads/writes MCP client config JSON files (Cursor, Claude Desktop format). Handles backup/restore. Cross-client helpers: `listKnownConfigPaths()`, `addBrokerToConfig()`, `hasBrokerEntry()`.
+- **client-config.ts** — Reads/writes MCP client config JSON files (Cursor, Claude Desktop format). Handles backup/restore. Cross-client helpers: `listKnownConfigPaths()`, `addBrokerToConfig()`, `hasBrokerEntry()`. Conversion helpers: `entryToRecord()`, `recordToEntry()` bridge between registry entries and store records.
 - **setup-rewrite.ts** — Config rewrite pick-list logic for `setup` command. `parseSelection()` parses user input into indices. `promptAndRewriteConfigs()` displays candidates, prompts user, and rewrites selected configs. Uses `PromptIO` interface for testability.
 - **logger.ts** — stderr-only (stdout is reserved for MCP stdio protocol).
 
@@ -62,6 +63,9 @@ All imports require `.js` extension even in TypeScript:
 - `@modelcontextprotocol/sdk/server/stdio.js` — `StdioServerTransport`
 - `@modelcontextprotocol/sdk/client/index.js` — `Client`
 - `@modelcontextprotocol/sdk/client/stdio.js` — `StdioClientTransport`
+- `@modelcontextprotocol/sdk/client/streamableHttp.js` — `StreamableHTTPClientTransport`
+- `@modelcontextprotocol/sdk/client/sse.js` — `SSEClientTransport`
+- `@modelcontextprotocol/sdk/shared/transport.js` — `Transport` type
 - `@modelcontextprotocol/sdk/types.js` — schemas and types (`ListToolsRequestSchema`, `CallToolRequestSchema`, `Tool`, `CallToolResult`, `McpError`, `ErrorCode`)
 
 ### Key constraints
@@ -74,6 +78,7 @@ All imports require `.js` extension even in TypeScript:
 - **Registry permissions** — `servers.json` is chmod 0600 because it may contain env vars with API keys.
 - **Backup before rewrite** — the `setup` command always verifies backup size > 0 before overwriting the original config.
 - **Tool ID prefixing** — tools are stored with `server__tool` IDs via `prefixToolName()` in `store.ts`.
+- **DB CHECK constraints** — `servers` table enforces that exactly one of `command` or `url` is non-null via CHECK constraints. Applied to new DBs and DBs going through `migrateUrlColumns()`.
 
 ### Running E2E tests
 
