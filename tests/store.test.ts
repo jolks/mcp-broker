@@ -110,6 +110,34 @@ describe("Store", () => {
     });
   });
 
+  // ── CHECK constraints ──────────────────────────────────
+
+  describe("CHECK constraints", () => {
+    it("rejects inserting a server with both command and url", () => {
+      expect(() => {
+        store.runInTransaction(() => {
+          (store as any).db
+            .prepare(
+              `INSERT INTO servers (name, command, url) VALUES ('bad', 'node', 'https://example.com')`
+            )
+            .run();
+        });
+      }).toThrow();
+    });
+
+    it("rejects inserting a server with neither command nor url", () => {
+      expect(() => {
+        store.runInTransaction(() => {
+          (store as any).db
+            .prepare(
+              `INSERT INTO servers (name, command, url) VALUES ('bad', NULL, NULL)`
+            )
+            .run();
+        });
+      }).toThrow();
+    });
+  });
+
   // ── Tool CRUD ────────────────────────────────────────
 
   describe("tool CRUD", () => {

@@ -4,49 +4,32 @@ import type { UrlServerRecord } from "../src/store.js";
 
 // ── Transport mocks ─────────────────────────────────────
 
-let streamableConnectShouldFail = false;
-let sseConnectShouldFail = false;
+const mockTransport = {
+  onclose: null as (() => void) | null,
+  onerror: null as ((err: Error) => void) | null,
+  close: vi.fn().mockResolvedValue(undefined),
+};
 
-const transportInstances: Array<{
-  type: string;
-  onclose: (() => void) | null;
-  onerror: ((err: Error) => void) | null;
-  close: ReturnType<typeof vi.fn>;
-}> = [];
-
-function makeMockTransport(type: string) {
-  const t = {
-    type,
-    onclose: null as (() => void) | null,
-    onerror: null as ((err: Error) => void) | null,
-    close: vi.fn().mockResolvedValue(undefined),
-  };
-  transportInstances.push(t);
-  return t;
-}
+const mockClient = {
+  connect: vi.fn().mockResolvedValue(undefined),
+  close: vi.fn().mockResolvedValue(undefined),
+  getServerVersion: vi.fn(),
+};
 
 vi.mock("../src/transport.js", () => ({
   createStdioTransport: vi.fn(),
-  createStreamableTransport: vi.fn(() => makeMockTransport("streamable")),
-  createSseTransport: vi.fn(() => makeMockTransport("sse")),
+  createStreamableTransport: vi.fn(),
+  createSseTransport: vi.fn(),
+  connectUrl: vi.fn(async () => ({ client: mockClient, transport: mockTransport })),
 }));
 
-vi.mock("@modelcontextprotocol/sdk/client/index.js", () => {
-  return {
-    Client: class MockClient {
-      connect = vi.fn(async (transport: { type?: string }) => {
-        if (transport.type === "streamable" && streamableConnectShouldFail) {
-          throw new Error("streamable connect failed");
-        }
-        if (transport.type === "sse" && sseConnectShouldFail) {
-          throw new Error("sse connect failed");
-        }
-      });
-      close = vi.fn().mockResolvedValue(undefined);
-      getServerVersion = vi.fn();
-    },
-  };
-});
+vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
+  Client: class MockClient {
+    connect = vi.fn().mockResolvedValue(undefined);
+    close = vi.fn().mockResolvedValue(undefined);
+    getServerVersion = vi.fn();
+  },
+}));
 
 const server: UrlServerRecord = {
   name: "test-url",
@@ -54,14 +37,13 @@ const server: UrlServerRecord = {
   headers: { Authorization: "Bearer tok" },
 };
 
-describe("Pool URL connection fallback", () => {
+describe("Pool URL connection via connectUrl", () => {
   let pool: Pool;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    transportInstances.length = 0;
-    streamableConnectShouldFail = false;
-    sseConnectShouldFail = false;
+    mockTransport.onclose = null;
+    mockTransport.onerror = null;
     pool = new Pool();
   });
 
@@ -69,50 +51,25 @@ describe("Pool URL connection fallback", () => {
     await pool.closeAll();
   });
 
-  it("succeeds with Streamable HTTP — no SSE fallback", async () => {
+  it("delegates to connectUrl for URL servers", async () => {
+    const { connectUrl } = await import("../src/transport.js");
+
     await pool.connectServer(server);
 
+    expect(connectUrl).toHaveBeenCalledWith(server, expect.objectContaining({
+      clientName: expect.any(String),
+      clientVersion: expect.any(String),
+      timeoutMs: expect.any(Number),
+      timeoutLabel: expect.stringContaining("test-url"),
+    }));
     expect(pool.isConnected("test-url")).toBe(true);
-    // Only one transport created (streamable)
-    expect(transportInstances).toHaveLength(1);
-    expect(transportInstances[0].type).toBe("streamable");
   });
 
-  it("falls back to SSE when Streamable HTTP connect fails", async () => {
-    streamableConnectShouldFail = true;
+  it("propagates error when connectUrl fails", async () => {
+    const { connectUrl } = await import("../src/transport.js");
+    vi.mocked(connectUrl).mockRejectedValueOnce(new Error("both transports failed"));
 
-    await pool.connectServer(server);
-
-    expect(pool.isConnected("test-url")).toBe(true);
-    // Two transports created: streamable (failed) + SSE (succeeded)
-    expect(transportInstances).toHaveLength(2);
-    expect(transportInstances[0].type).toBe("streamable");
-    expect(transportInstances[1].type).toBe("sse");
-  });
-
-  it("closes failed streamable transport during fallback", async () => {
-    streamableConnectShouldFail = true;
-
-    await pool.connectServer(server);
-
-    expect(transportInstances[0].close).toHaveBeenCalled();
-  });
-
-  it("propagates error when both transports fail", async () => {
-    streamableConnectShouldFail = true;
-    sseConnectShouldFail = true;
-
-    await expect(pool.connectServer(server)).rejects.toThrow("sse connect failed");
+    await expect(pool.connectServer(server)).rejects.toThrow("both transports failed");
     expect(pool.isConnected("test-url")).toBe(false);
-  });
-
-  it("preserves headers through fallback", async () => {
-    const { createStreamableTransport, createSseTransport } = await import("../src/transport.js");
-    streamableConnectShouldFail = true;
-
-    await pool.connectServer(server);
-
-    expect(createStreamableTransport).toHaveBeenCalledWith(server);
-    expect(createSseTransport).toHaveBeenCalledWith(server);
   });
 });

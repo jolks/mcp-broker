@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { type ServerRecord, isUrlServer } from "./store.js";
-import { createStdioTransport, createStreamableTransport, createSseTransport } from "./transport.js";
+import { createStdioTransport, connectUrl } from "./transport.js";
 import { logger } from "./logger.js";
 import { VERSION, HARVESTER_NAME, HARVEST_TIMEOUT_MS, raceTimeout } from "./config.js";
 
@@ -31,31 +31,12 @@ async function connectForHarvest(
     return { client, transport };
   }
 
-  // Try Streamable HTTP first
-  let transport: Transport = createStreamableTransport(server);
-  let client = new Client({ name: HARVESTER_NAME, version: VERSION });
-
-  try {
-    await raceTimeout(
-      client.connect(transport),
-      HARVEST_TIMEOUT_MS,
-      `Connecting to ${label} timed out`,
-    );
-    return { client, transport };
-  } catch {
-    logger.info(`Streamable HTTP failed for "${server.name}", trying SSE`);
-    try { await transport.close(); } catch { /* best-effort */ }
-  }
-
-  // Fall back to SSE
-  transport = createSseTransport(server);
-  client = new Client({ name: HARVESTER_NAME, version: VERSION });
-  await raceTimeout(
-    client.connect(transport),
-    HARVEST_TIMEOUT_MS,
-    `Connecting to ${label} timed out (SSE fallback)`,
-  );
-  return { client, transport };
+  return connectUrl(server, {
+    clientName: HARVESTER_NAME,
+    clientVersion: VERSION,
+    timeoutMs: HARVEST_TIMEOUT_MS,
+    timeoutLabel: `Connecting to ${label} timed out`,
+  });
 }
 
 export async function harvestTools(

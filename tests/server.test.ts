@@ -516,6 +516,16 @@ describe("handleMetaTool", () => {
       expect(text).toContain("headers");
     });
 
+    it("returns error when both command and url are provided", async () => {
+      const result = await handleMetaTool(broker, "update_mcp_server", {
+        name: "srv",
+        command: "node",
+        url: "https://example.com/mcp",
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content[0] as any).text).toContain("either 'command' or 'url', not both");
+    });
+
     it("updates URL server headers only", async () => {
       vi.mocked(broker.updateServer).mockResolvedValue({ toolCount: 2 });
 

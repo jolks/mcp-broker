@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Broker, type ToolInvocation, type ServerUpdate } from "./broker.js";
+import type { ServerRecord } from "./store.js";
 import { logger } from "./logger.js";
 import { VERSION, SERVER_NAME, DEFAULT_SEARCH_LIMIT, getErrorMessage } from "./config.js";
 
@@ -343,7 +344,7 @@ export async function handleMetaTool(
         return errorResult("Error: provide either 'command' or 'url', not both");
       }
       try {
-        const server: import("./store.js").ServerRecord = url
+        const server: ServerRecord = url
           ? { name: serverName, url, headers: args.headers as Record<string, string> | undefined }
           : { name: serverName, command: command!, args: (args.args as string[]) ?? [], env: args.env as Record<string, string> | undefined };
         const { toolCount } = await broker.addServer(server);
@@ -430,6 +431,10 @@ export async function handleMetaTool(
 
       if (!hasUpdates) {
         return errorResult("Error: at least one field (command, args, env, url, headers) must be provided");
+      }
+
+      if (updates.command !== undefined && updates.url !== undefined) {
+        return errorResult("Error: provide either 'command' or 'url', not both");
       }
 
       try {

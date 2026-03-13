@@ -79,7 +79,10 @@ export class Store {
         url TEXT,
         headers TEXT,
         created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
+        updated_at TEXT DEFAULT (datetime('now')),
+        -- command vs url mutual exclusivity enforced at DB level
+        CHECK (command IS NOT NULL OR url IS NOT NULL),
+        CHECK (NOT (command IS NOT NULL AND url IS NOT NULL))
       );
 
       CREATE TABLE IF NOT EXISTS tools (
@@ -128,7 +131,10 @@ export class Store {
           url TEXT,
           headers TEXT,
           created_at TEXT DEFAULT (datetime('now')),
-          updated_at TEXT DEFAULT (datetime('now'))
+          updated_at TEXT DEFAULT (datetime('now')),
+          -- command vs url mutual exclusivity enforced at DB level
+          CHECK (command IS NOT NULL OR url IS NOT NULL),
+          CHECK (NOT (command IS NOT NULL AND url IS NOT NULL))
         );
       `);
       this.db.exec(`
@@ -145,6 +151,7 @@ export class Store {
 
   upsertServer(server: ServerRecord): void {
     if (isUrlServer(server)) {
+      // args/env set to defaults — unused for URL servers but column is NOT NULL
       this.db
         .prepare(
           `INSERT INTO servers (name, command, args, env, url, headers, updated_at)
