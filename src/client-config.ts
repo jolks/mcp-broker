@@ -4,11 +4,46 @@ import { homedir, platform } from "node:os";
 import { readdirSync } from "node:fs";
 import { logger } from "./logger.js";
 import { backupsDir, SERVER_NAME } from "./config.js";
+import type { ServerRecord } from "./store.js";
+import { isUrlServer } from "./store.js";
 
-export interface McpServerEntry {
+export interface StdioServerEntry {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+}
+
+export interface UrlServerEntry {
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServerEntry = StdioServerEntry | UrlServerEntry;
+
+export function isUrlEntry(entry: McpServerEntry): entry is UrlServerEntry {
+  return "url" in entry;
+}
+
+/** Convert registry entry to store record. Warns if entry has both url and command. */
+export function entryToRecord(name: string, entry: McpServerEntry): ServerRecord {
+  const hasUrl = "url" in entry;
+  const hasCommand = "command" in entry;
+  if (hasUrl && hasCommand) {
+    logger.warn(`Server "${name}" has both url and command — preferring URL`);
+  }
+  if (hasUrl) {
+    return { name, url: (entry as UrlServerEntry).url, headers: (entry as UrlServerEntry).headers };
+  }
+  const stdio = entry as StdioServerEntry;
+  return { name, command: stdio.command, args: stdio.args ?? [], env: stdio.env };
+}
+
+/** Convert store record back to registry entry. */
+export function recordToEntry(server: ServerRecord): McpServerEntry {
+  if (isUrlServer(server)) {
+    return { url: server.url, headers: server.headers };
+  }
+  return { command: server.command, args: server.args, env: server.env };
 }
 
 export interface McpConfig {
@@ -43,7 +78,7 @@ function readConfigOrDefault(configPath: string): McpConfig {
   try { return readConfig(configPath); } catch { return {}; }
 }
 
-export function buildBrokerEntry(): McpServerEntry {
+export function buildBrokerEntry(): StdioServerEntry {
   const brokerHome = process.env.MCP_BROKER_HOME;
   if (brokerHome) {
     return {

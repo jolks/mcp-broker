@@ -1,11 +1,11 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Store, type ServerRecord, type SearchResult, type ToolSummary } from "./store.js";
+import { Store, type ServerRecord, type SearchResult, type ToolSummary, isUrlServer } from "./store.js";
 import { Pool } from "./pool.js";
 import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
 import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS, DEFAULT_SEARCH_LIMIT } from "./config.js";
-import type { McpServerEntry } from "./client-config.js";
+import { type McpServerEntry, entryToRecord, recordToEntry } from "./client-config.js";
 
 export interface ToolInvocation {
   server_name: string;
@@ -17,6 +17,8 @@ export interface ServerUpdate {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
 }
 
 export interface CallToolsOptions {
@@ -25,9 +27,11 @@ export interface CallToolsOptions {
 
 export interface ServerDetail {
   name: string;
-  command: string;
-  args: string[];
+  command?: string;
+  args?: string[];
   env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
   connected: boolean;
   toolCount: number;
   tools: ToolSummary[];
@@ -154,17 +158,13 @@ export class Broker {
 
   // ── Server Management ─────────────────────────────────
 
-  private toRegistryEntry(server: ServerRecord): McpServerEntry {
-    return { command: server.command, args: server.args, env: server.env };
-  }
-
   async addServer(server: ServerRecord): Promise<{ toolCount: number }> {
     // Write to registry first (source of truth)
-    this.registry.addServer(server.name, this.toRegistryEntry(server));
+    this.registry.addServer(server.name, recordToEntry(server));
 
     this.store.upsertServer(server);
 
-    const tools = await harvestTools(server.command, server.args, server.env);
+    const tools = await harvestTools(server);
     this.store.upsertTools(server.name, tools);
 
     try {
@@ -197,16 +197,17 @@ export class Broker {
   getServer(name: string): ServerDetail | undefined {
     const server = this.store.getServer(name);
     if (!server) return undefined;
-    return {
+    const base = {
       name: server.name,
-      command: server.command,
-      args: server.args,
-      env: server.env,
       connected: this.pool.isConnected(server.name),
       toolCount: this.store.getToolCount(server.name),
       tools: this.store.getToolsForServer(server.name),
       version: this.pool.getServerVersion(server.name)?.version,
     };
+    if (isUrlServer(server)) {
+      return { ...base, url: server.url, headers: server.headers };
+    }
+    return { ...base, command: server.command, args: server.args, env: server.env };
   }
 
   async updateServer(name: string, updates: ServerUpdate): Promise<{ toolCount: number }> {
@@ -215,20 +216,33 @@ export class Broker {
       throw new Error(`Server "${name}" not found`);
     }
 
-    const merged: ServerRecord = {
-      name,
-      command: updates.command ?? existing.command,
-      args: updates.args ?? existing.args,
-      env: updates.env ?? existing.env,
-    };
+    let merged: ServerRecord;
+    if (updates.url !== undefined) {
+      // Switching to or updating a URL-based server
+      merged = { name, url: updates.url, headers: updates.headers };
+    } else if (isUrlServer(existing) && updates.command === undefined) {
+      // Existing URL server, updating headers only
+      merged = { name, url: existing.url, headers: updates.headers ?? existing.headers };
+    } else if (isUrlServer(existing)) {
+      // Switching from URL to stdio
+      merged = { name, command: updates.command!, args: updates.args ?? [], env: updates.env };
+    } else {
+      // Existing stdio server, partial update
+      merged = {
+        name,
+        command: updates.command ?? existing.command,
+        args: updates.args ?? existing.args,
+        env: updates.env ?? existing.env,
+      };
+    }
 
     // Write to registry (source of truth) and store
-    this.registry.addServer(name, this.toRegistryEntry(merged));
+    this.registry.addServer(name, recordToEntry(merged));
     this.store.upsertServer(merged);
 
     // Disconnect, re-harvest, reconnect
     await this.pool.disconnectServer(name);
-    const tools = await harvestTools(merged.command, merged.args, merged.env);
+    const tools = await harvestTools(merged);
     this.store.upsertTools(name, tools);
     try {
       await this.pool.connectServer(merged);
@@ -247,14 +261,7 @@ export class Broker {
       ? entries.filter((e) => e.name === serverName)
       : entries;
 
-    for (const { name, entry } of servers) {
-      try {
-        const tools = await harvestTools(entry.command, entry.args, entry.env);
-        this.store.upsertTools(name, tools);
-      } catch (err) {
-        logger.error(`Failed to refresh tools for "${name}": ${err}`);
-      }
-    }
+    await this.harvestAndStoreAll(servers, "Refresh");
   }
 
   // ── Harvest helper ──────────────────────────────────────
@@ -265,7 +272,7 @@ export class Broker {
   ): Promise<void> {
     const results = await Promise.allSettled(
       servers.map(async ({ name, entry }) => {
-        const tools = await harvestTools(entry.command, entry.args, entry.env);
+        const tools = await harvestTools(entryToRecord(name, entry));
         return { name, tools };
       })
     );
@@ -288,9 +295,9 @@ export class Broker {
 
     if (registryEntries.length === 0 && storeServers.length > 0) {
       logger.info("Migrating servers from SQLite to servers.json");
-      const toImport: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
+      const toImport: Record<string, McpServerEntry> = {};
       for (const s of storeServers) {
-        toImport[s.name] = { command: s.command, args: s.args, env: s.env };
+        toImport[s.name] = recordToEntry(s);
       }
       this.registry.importServers(toImport);
     }
@@ -302,12 +309,7 @@ export class Broker {
     // Sync to SQLite in a single transaction: upsert all from registry, remove stale entries
     this.store.runInTransaction(() => {
       for (const { name, entry } of entries) {
-        this.store.upsertServer({
-          name,
-          command: entry.command,
-          args: entry.args ?? [],
-          env: entry.env,
-        });
+        this.store.upsertServer(entryToRecord(name, entry));
       }
       for (const s of storeServers) {
         if (!registryNames.has(s.name)) {

@@ -1,12 +1,13 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { ServerRecord } from "./store.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { type ServerRecord, isUrlServer } from "./store.js";
+import { createStdioTransport, connectUrl } from "./transport.js";
 import { logger } from "./logger.js";
-import { VERSION, SERVER_NAME, CONNECT_TIMEOUT_MS, INITIAL_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_MS, MAX_RECONNECT_ATTEMPTS, buildEnv, raceTimeout } from "./config.js";
+import { VERSION, SERVER_NAME, CONNECT_TIMEOUT_MS, INITIAL_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_MS, MAX_RECONNECT_ATTEMPTS, raceTimeout } from "./config.js";
 
 interface PoolEntry {
   client: Client;
-  transport: StdioClientTransport;
+  transport: Transport;
 }
 
 export class Pool {
@@ -21,16 +22,25 @@ export class Pool {
       return this.entries.get(server.name)!.client;
     }
 
-    const transport = new StdioClientTransport({
-      command: server.command,
-      args: server.args,
-      env: buildEnv(server.env),
-      stderr: "pipe",
-    });
+    let client: Client;
+    let transport: Transport;
 
-    const client = new Client(
-      { name: SERVER_NAME, version: VERSION },
-    );
+    if (isUrlServer(server)) {
+      ({ client, transport } = await connectUrl(server, {
+        clientName: SERVER_NAME,
+        clientVersion: VERSION,
+        timeoutMs: CONNECT_TIMEOUT_MS,
+        timeoutLabel: `Connection to "${server.name}" timed out`,
+      }));
+    } else {
+      transport = createStdioTransport(server);
+      client = new Client({ name: SERVER_NAME, version: VERSION });
+      await raceTimeout(
+        client.connect(transport),
+        CONNECT_TIMEOUT_MS,
+        `Connection to "${server.name}" timed out`,
+      );
+    }
 
     // Listen for transport close to attempt reconnect
     transport.onclose = () => {
@@ -43,12 +53,6 @@ export class Pool {
     transport.onerror = (err: Error) => {
       logger.error(`Transport error for "${server.name}": ${err.message}`);
     };
-
-    await raceTimeout(
-      client.connect(transport),
-      CONNECT_TIMEOUT_MS,
-      `Connection to "${server.name}" timed out`
-    );
 
     this.entries.set(server.name, { client, transport });
     logger.info(`Connected to server "${server.name}"`);

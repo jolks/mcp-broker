@@ -1,6 +1,6 @@
 import { Store } from "./store.js";
 import { Registry } from "./registry.js";
-import { readConfig, backupConfig, rewriteConfigForBroker } from "./client-config.js";
+import { readConfig, backupConfig, rewriteConfigForBroker, entryToRecord, type McpServerEntry } from "./client-config.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
 import { SERVER_NAME, getErrorMessage } from "./config.js";
@@ -36,27 +36,20 @@ export async function setupFromConfig(
   const backupPath = backupConfig(configPath);
 
   // Write to registry (source of truth)
-  const toImport: Record<string, { command: string; args?: string[]; env?: Record<string, string> }> = {};
+  const toImport: Record<string, McpServerEntry> = {};
   for (const name of names) {
     toImport[name] = entries[name];
   }
   registry.importServers(toImport);
 
   for (const name of names) {
-    const entry = entries[name];
-    store.upsertServer({
-      name,
-      command: entry.command,
-      args: entry.args ?? [],
-      env: entry.env,
-    });
+    store.upsertServer(entryToRecord(name, entries[name]));
   }
 
   // Harvest tools in parallel
   const results = await Promise.allSettled(
     names.map(async (name) => {
-      const entry = entries[name];
-      const tools = await harvestTools(entry.command, entry.args, entry.env);
+      const tools = await harvestTools(entryToRecord(name, entries[name]));
       store.upsertTools(name, tools);
       return { name, toolCount: tools.length };
     })

@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 import { Store } from "../src/store.js";
-import { makeServer } from "./helpers.js";
+import { makeServer, makeUrlServer } from "./helpers.js";
 
 describe("Store", () => {
   let store: Store;
@@ -57,6 +61,80 @@ describe("Store", () => {
       store.upsertServer(makeServer({ name: "s1", env: undefined }));
       const got = store.getServer("s1");
       expect(got?.env).toBeUndefined();
+    });
+
+    it("upserts and retrieves a URL server", () => {
+      const server = makeUrlServer();
+      store.upsertServer(server);
+      const got = store.getServer("test-url-server");
+      expect(got).toEqual(server);
+    });
+
+    it("URL server has no command field", () => {
+      store.upsertServer(makeUrlServer());
+      const got = store.getServer("test-url-server");
+      expect(got).toBeDefined();
+      expect("url" in got!).toBe(true);
+      expect("command" in got!).toBe(false);
+    });
+
+    it("URL server stores headers", () => {
+      store.upsertServer(makeUrlServer({ name: "h1", headers: { Authorization: "Bearer tok" } }));
+      const got = store.getServer("h1");
+      expect(got).toBeDefined();
+      expect("url" in got! && got.headers).toEqual({ Authorization: "Bearer tok" });
+    });
+
+    it("URL server with no headers", () => {
+      store.upsertServer(makeUrlServer({ name: "h2" }));
+      const got = store.getServer("h2");
+      expect(got).toBeDefined();
+      expect("url" in got! && got.headers).toBeUndefined();
+    });
+
+    it("lists mixed stdio and URL servers", () => {
+      store.upsertServer(makeServer({ name: "alpha" }));
+      store.upsertServer(makeUrlServer({ name: "beta" }));
+      const servers = store.listServers();
+      expect(servers.map((s) => s.name)).toEqual(["alpha", "beta"]);
+      expect("command" in servers[0]).toBe(true);
+      expect("url" in servers[1]).toBe(true);
+    });
+
+    it("overwriting stdio server with URL server works", () => {
+      store.upsertServer(makeServer({ name: "s1" }));
+      store.upsertServer(makeUrlServer({ name: "s1", url: "http://new.example.com" }));
+      const got = store.getServer("s1");
+      expect("url" in got!).toBe(true);
+      expect("command" in got!).toBe(false);
+    });
+  });
+
+  // ── CHECK constraints ──────────────────────────────────
+
+  describe("CHECK constraints", () => {
+    it("rejects inserting a server with both command and url", () => {
+      expect(() => {
+        store.runInTransaction(() => {
+          (store as any).db
+            .prepare(
+              `INSERT INTO servers (name, command, url) VALUES ('bad', 'node', 'https://example.com')`
+            )
+            .run();
+        });
+      }).toThrow();
+    });
+
+    it("rejects inserting a server with neither command nor url", () => {
+      expect(() => {
+        store.runInTransaction(() => {
+          (store as any).db
+            .prepare(
+              `INSERT INTO servers (name, command, url) VALUES ('bad', NULL, NULL)`
+            )
+            .run();
+        });
+      }).toThrow();
     });
   });
 
@@ -286,6 +364,85 @@ describe("Store", () => {
       expect(store.getToolCount("b")).toBe(1);
       const results = store.searchTools("tb");
       expect(results.length).toBe(1);
+    });
+  });
+
+  // ── DB migration ──────────────────────────────────────
+
+  describe("migrateUrlColumns", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), "mcp-broker-migration-test-"));
+    });
+
+    function createOldSchemaDb(dbPath: string): void {
+      const db = new Database(dbPath);
+      db.pragma("journal_mode = WAL");
+      db.exec(`
+        CREATE TABLE servers (
+          name TEXT PRIMARY KEY,
+          command TEXT NOT NULL,
+          args TEXT NOT NULL DEFAULT '[]',
+          env TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`
+        CREATE TABLE tools (
+          id TEXT PRIMARY KEY,
+          server_name TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          input_schema TEXT NOT NULL DEFAULT '{}',
+          harvested_at TEXT DEFAULT (datetime('now')),
+          FOREIGN KEY (server_name) REFERENCES servers(name) ON DELETE CASCADE
+        );
+      `);
+      db.prepare("INSERT INTO servers (name, command, args) VALUES (?, ?, ?)").run(
+        "legacy", "node", '["old-server.js"]'
+      );
+      db.close();
+    }
+
+    it("migrates old schema and preserves existing stdio data", () => {
+      const dbPath = join(tmpDir, "migrate.db");
+      createOldSchemaDb(dbPath);
+
+      const newStore = new Store(dbPath);
+      const server = newStore.getServer("legacy");
+      expect(server).toBeDefined();
+      expect("command" in server!).toBe(true);
+      expect(server!.command).toBe("node");
+      newStore.close();
+    });
+
+    it("is idempotent — already-migrated DB does not break", () => {
+      const dbPath = join(tmpDir, "idempotent.db");
+      createOldSchemaDb(dbPath);
+
+      // First open triggers migration
+      const store1 = new Store(dbPath);
+      store1.close();
+
+      // Second open should not throw
+      const store2 = new Store(dbPath);
+      const server = store2.getServer("legacy");
+      expect(server).toBeDefined();
+      store2.close();
+    });
+
+    it("can insert URL server after migration", () => {
+      const dbPath = join(tmpDir, "url-after-migrate.db");
+      createOldSchemaDb(dbPath);
+
+      const newStore = new Store(dbPath);
+      newStore.upsertServer(makeUrlServer({ name: "remote", url: "https://example.com/mcp" }));
+      const got = newStore.getServer("remote");
+      expect(got).toBeDefined();
+      expect("url" in got!).toBe(true);
+      newStore.close();
     });
   });
 });

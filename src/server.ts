@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Broker, type ToolInvocation, type ServerUpdate } from "./broker.js";
+import type { ServerRecord } from "./store.js";
 import { logger } from "./logger.js";
 import { VERSION, SERVER_NAME, DEFAULT_SEARCH_LIMIT, getErrorMessage } from "./config.js";
 
@@ -53,12 +54,13 @@ export const META_TOOLS: Tool[] = [
   {
     name: "add_mcp_server",
     description:
-      "Register a new MCP server. The server will be connected, its tools harvested and indexed for search.",
+      "Register a new MCP server (stdio or URL-based). The server will be connected, its tools harvested and indexed for search. " +
+      "Provide either command (stdio) or url (SSE/Streamable HTTP), not both.",
     inputSchema: {
       type: "object" as const,
       properties: {
         name: { type: "string", description: "Unique name for this server (e.g., 'github', 'filesystem')" },
-        command: { type: "string", description: "Command to launch the server (e.g., 'npx')" },
+        command: { type: "string", description: "Command to launch a stdio server (e.g., 'npx')" },
         args: {
           type: "array",
           items: { type: "string" },
@@ -67,10 +69,17 @@ export const META_TOOLS: Tool[] = [
         env: {
           type: "object",
           additionalProperties: { type: "string" },
-          description: "Environment variables (e.g., { GITHUB_TOKEN: '...' })",
+          description: "Environment variables for stdio server (e.g., { GITHUB_TOKEN: '...' })",
+        },
+        url: { type: "string", description: "URL for SSE/Streamable HTTP server (e.g., 'https://mcp.example.com/sse')" },
+        headers: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "HTTP headers for URL-based server (e.g., { Authorization: 'Bearer ...' })",
         },
       },
-      required: ["name", "command"],
+      // Mutual exclusivity of command vs url is enforced at runtime in handleMetaTool
+      required: ["name"],
     },
     annotations: { idempotentHint: true },
   },
@@ -115,7 +124,7 @@ export const META_TOOLS: Tool[] = [
     name: "update_mcp_server",
     description:
       "Update a registered MCP server's configuration. Only provided fields are changed. " +
-      "If command/args/env change, the server is re-harvested and reconnected.",
+      "If command/args/env/url/headers change, the server is re-harvested and reconnected.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -130,6 +139,12 @@ export const META_TOOLS: Tool[] = [
           type: "object",
           additionalProperties: { type: "string" },
           description: "New environment variables (replaces all existing env vars)",
+        },
+        url: { type: "string", description: "New URL for SSE/Streamable HTTP server" },
+        headers: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "New HTTP headers for URL-based server",
         },
       },
       required: ["name"],
@@ -317,17 +332,22 @@ export async function handleMetaTool(
 
     case "add_mcp_server": {
       const serverName = args.name as string;
-      const command = args.command as string;
-      if (!serverName || !command) {
-        return errorResult("Error: 'name' and 'command' are required");
+      const command = args.command as string | undefined;
+      const url = args.url as string | undefined;
+      if (!serverName) {
+        return errorResult("Error: 'name' is required");
+      }
+      if (!command && !url) {
+        return errorResult("Error: either 'command' (stdio) or 'url' (SSE/HTTP) is required");
+      }
+      if (command && url) {
+        return errorResult("Error: provide either 'command' or 'url', not both");
       }
       try {
-        const { toolCount } = await broker.addServer({
-          name: serverName,
-          command,
-          args: (args.args as string[]) ?? [],
-          env: args.env as Record<string, string> | undefined,
-        });
+        const server: ServerRecord = url
+          ? { name: serverName, url, headers: args.headers as Record<string, string> | undefined }
+          : { name: serverName, command: command!, args: (args.args as string[]) ?? [], env: args.env as Record<string, string> | undefined };
+        const { toolCount } = await broker.addServer(server);
         return textResult(`Added server "${serverName}" with ${toolCount} tools.`);
       } catch (err) {
         return errorResult(`Failed to add server "${serverName}": ${getErrorMessage(err)}`);
@@ -364,13 +384,17 @@ export async function handleMetaTool(
         return errorResult(`Server "${serverName}" not found.`);
       }
 
-      const envKeys = server.env ? Object.keys(server.env) : [];
-      const lines = [
-        `**${server.name}**`,
-        `- Command: \`${server.command}\``,
-        `- Args: ${server.args.length > 0 ? server.args.map((a) => `\`${a}\``).join(", ") : "(none)"}`,
-        `- Env vars: ${envKeys.length > 0 ? envKeys.join(", ") : "(none)"}`,
-      ];
+      const lines = [`**${server.name}**`];
+      if (server.url) {
+        lines.push(`- URL: \`${server.url}\``);
+        const headerKeys = server.headers ? Object.keys(server.headers) : [];
+        lines.push(`- Headers: ${headerKeys.length > 0 ? headerKeys.join(", ") : "(none)"}`);
+      } else {
+        lines.push(`- Command: \`${server.command}\``);
+        lines.push(`- Args: ${server.args && server.args.length > 0 ? server.args.map((a: string) => `\`${a}\``).join(", ") : "(none)"}`);
+        const envKeys = server.env ? Object.keys(server.env) : [];
+        lines.push(`- Env vars: ${envKeys.length > 0 ? envKeys.join(", ") : "(none)"}`);
+      }
       if (server.version) {
         lines.push(`- Version: ${server.version}`);
       }
@@ -402,9 +426,15 @@ export async function handleMetaTool(
       if (args.command !== undefined) { updates.command = args.command as string; hasUpdates = true; }
       if (args.args !== undefined) { updates.args = args.args as string[]; hasUpdates = true; }
       if (args.env !== undefined) { updates.env = args.env as Record<string, string>; hasUpdates = true; }
+      if (args.url !== undefined) { updates.url = args.url as string; hasUpdates = true; }
+      if (args.headers !== undefined) { updates.headers = args.headers as Record<string, string>; hasUpdates = true; }
 
       if (!hasUpdates) {
-        return errorResult("Error: at least one field (command, args, env) must be provided");
+        return errorResult("Error: at least one field (command, args, env, url, headers) must be provided");
+      }
+
+      if (updates.command !== undefined && updates.url !== undefined) {
+        return errorResult("Error: provide either 'command' or 'url', not both");
       }
 
       try {

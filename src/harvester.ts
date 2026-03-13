@@ -1,8 +1,10 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { type ServerRecord, isUrlServer } from "./store.js";
+import { createStdioTransport, connectUrl } from "./transport.js";
 import { logger } from "./logger.js";
-import { VERSION, HARVESTER_NAME, HARVEST_TIMEOUT_MS, buildEnv, raceTimeout } from "./config.js";
+import { VERSION, HARVESTER_NAME, HARVEST_TIMEOUT_MS, raceTimeout } from "./config.js";
 
 export interface HarvestedTool {
   tool_name: string;
@@ -10,29 +12,43 @@ export interface HarvestedTool {
   input_schema: string; // JSON string
 }
 
-export async function harvestTools(
-  command: string,
-  args: string[] = [],
-  env?: Record<string, string>
-): Promise<HarvestedTool[]> {
-  let transport: StdioClientTransport | undefined;
-
-  try {
-    transport = new StdioClientTransport({
-      command,
-      args,
-      env: buildEnv(env),
-      stderr: "pipe",
-    });
-
+/**
+ * Connect to a server for harvesting. Stdio servers connect directly;
+ * URL servers use Streamable HTTP → SSE fallback via connectUrl().
+ */
+async function connectForHarvest(
+  server: ServerRecord,
+  label: string,
+): Promise<{ client: Client; transport: Transport }> {
+  if (!isUrlServer(server)) {
+    const transport = createStdioTransport(server);
     const client = new Client({ name: HARVESTER_NAME, version: VERSION });
-
-    // Race against timeout
     await raceTimeout(
       client.connect(transport),
       HARVEST_TIMEOUT_MS,
-      `Connecting to ${command} timed out`
+      `Connecting to ${label} timed out`,
     );
+    return { client, transport };
+  }
+
+  return connectUrl(server, {
+    clientName: HARVESTER_NAME,
+    clientVersion: VERSION,
+    timeoutMs: HARVEST_TIMEOUT_MS,
+    timeoutLabel: `Connecting to ${label} timed out`,
+  });
+}
+
+export async function harvestTools(
+  server: ServerRecord
+): Promise<HarvestedTool[]> {
+  const label = isUrlServer(server) ? server.url : `${server.command} ${server.args.join(" ")}`;
+  let transport: Transport | undefined;
+
+  try {
+    const connected = await connectForHarvest(server, label);
+    const client = connected.client;
+    transport = connected.transport;
 
     // Collect all tools with pagination
     const allTools: Tool[] = [];
@@ -42,13 +58,13 @@ export async function harvestTools(
       const result = await raceTimeout(
         client.listTools(cursor ? { cursor } : undefined),
         HARVEST_TIMEOUT_MS,
-        `Listing tools from ${command} timed out`
+        `Listing tools from ${label} timed out`
       );
       allTools.push(...result.tools);
       cursor = result.nextCursor;
     } while (cursor);
 
-    logger.info(`Harvested ${allTools.length} tools from ${command} ${args.join(" ")}`);
+    logger.info(`Harvested ${allTools.length} tools from ${label}`);
 
     await client.close();
 
@@ -58,7 +74,7 @@ export async function harvestTools(
       input_schema: JSON.stringify(t.inputSchema ?? {}),
     }));
   } catch (err) {
-    logger.error(`Failed to harvest tools from ${command}: ${err}`);
+    logger.error(`Failed to harvest tools from ${label}: ${err}`);
     throw err;
   } finally {
     try {

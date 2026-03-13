@@ -3,7 +3,7 @@ import { Broker } from "../src/broker.js";
 import type { Store, SearchResult } from "../src/store.js";
 import type { Pool } from "../src/pool.js";
 import type { Registry } from "../src/registry.js";
-import { makeServer, makeStore, makePool, makeRegistry } from "./helpers.js";
+import { makeServer, makeUrlServer, makeStore, makePool, makeRegistry } from "./helpers.js";
 
 // Mock harvester
 vi.mock("../src/harvester.js", () => ({
@@ -316,7 +316,7 @@ describe("Broker", () => {
         env: server.env,
       });
       expect(store.upsertServer).toHaveBeenCalledWith(server);
-      expect(mockHarvestTools).toHaveBeenCalledWith(server.command, server.args, server.env);
+      expect(mockHarvestTools).toHaveBeenCalledWith(server);
       expect(store.upsertTools).toHaveBeenCalledWith("test-server", [
         { tool_name: "t1", description: "Tool 1", input_schema: "{}" },
         { tool_name: "t2", description: "Tool 2", input_schema: "{}" },
@@ -448,7 +448,7 @@ describe("Broker", () => {
       expect(registry.addServer).toHaveBeenCalledWith("srv", expect.objectContaining({ command: "deno" }));
       expect(store.upsertServer).toHaveBeenCalledWith(expect.objectContaining({ name: "srv", command: "deno" }));
       expect(pool.disconnectServer).toHaveBeenCalledWith("srv");
-      expect(mockHarvestTools).toHaveBeenCalledWith("deno", ["old.js"], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "srv", command: "deno", args: ["old.js"] }));
       expect(store.upsertTools).toHaveBeenCalled();
       expect(pool.connectServer).toHaveBeenCalled();
       expect(result.toolCount).toBe(1);
@@ -473,6 +473,70 @@ describe("Broker", () => {
       await expect(broker.updateServer("missing", { command: "x" }))
         .rejects.toThrow('Server "missing" not found');
     });
+
+    it("switches from stdio to URL", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeServer({ name: "srv", command: "node", args: ["old.js"] })
+      );
+      mockHarvestTools.mockResolvedValue([]);
+
+      await broker.updateServer("srv", { url: "https://example.com/mcp", headers: { Auth: "tok" } });
+
+      expect(store.upsertServer).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", url: "https://example.com/mcp", headers: { Auth: "tok" } })
+      );
+      // Should NOT contain command
+      const upsertArg = vi.mocked(store.upsertServer).mock.calls[0][0];
+      expect("command" in upsertArg).toBe(false);
+    });
+
+    it("switches from URL to stdio", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeUrlServer({ name: "srv", url: "https://old.example.com/mcp" })
+      );
+      mockHarvestTools.mockResolvedValue([]);
+
+      await broker.updateServer("srv", { command: "deno", args: ["new.ts"] });
+
+      expect(store.upsertServer).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", command: "deno", args: ["new.ts"] })
+      );
+      const upsertArg = vi.mocked(store.upsertServer).mock.calls[0][0];
+      expect("url" in upsertArg).toBe(false);
+    });
+
+    it("updates URL headers only", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeUrlServer({ name: "srv", url: "https://example.com/mcp", headers: { Old: "header" } })
+      );
+      mockHarvestTools.mockResolvedValue([]);
+
+      await broker.updateServer("srv", { headers: { New: "header" } });
+
+      expect(store.upsertServer).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", url: "https://example.com/mcp", headers: { New: "header" } })
+      );
+    });
+
+    it("type switch lifecycle: disconnect, re-harvest, reconnect", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeServer({ name: "srv", command: "node", args: [] })
+      );
+      mockHarvestTools.mockResolvedValue([
+        { tool_name: "t1", description: "T1", input_schema: "{}" },
+      ]);
+
+      await broker.updateServer("srv", { url: "https://example.com/mcp" });
+
+      expect(pool.disconnectServer).toHaveBeenCalledWith("srv");
+      expect(mockHarvestTools).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", url: "https://example.com/mcp" })
+      );
+      expect(store.upsertTools).toHaveBeenCalledWith("srv", [
+        { tool_name: "t1", description: "T1", input_schema: "{}" },
+      ]);
+      expect(pool.connectServer).toHaveBeenCalled();
+    });
   });
 
   // ── refreshTools ────────────────────────────────────
@@ -491,7 +555,7 @@ describe("Broker", () => {
 
       expect(registry.listEntries).toHaveBeenCalled();
       expect(mockHarvestTools).toHaveBeenCalledTimes(1);
-      expect(mockHarvestTools).toHaveBeenCalledWith("node", ["server.js"], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "srv", command: "node", args: ["server.js"] }));
       expect(store.upsertTools).toHaveBeenCalled();
     });
 
@@ -603,7 +667,7 @@ describe("Broker", () => {
 
       await broker.startup();
 
-      expect(mockHarvestTools).toHaveBeenCalledWith("cmd-a", [], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "a", command: "cmd-a", args: [] }));
       expect(store.upsertTools).toHaveBeenCalled();
     });
 
@@ -631,7 +695,7 @@ describe("Broker", () => {
       await broker.shutdown();
 
       // harvestTools called once during background refresh (not during initial startup since toolCount > 0)
-      expect(mockHarvestTools).toHaveBeenCalledWith("cmd", [], undefined);
+      expect(mockHarvestTools).toHaveBeenCalledWith(expect.objectContaining({ name: "stale-srv", command: "cmd", args: [] }));
     });
 
     it("startup skips background refresh for recently harvested servers", async () => {
