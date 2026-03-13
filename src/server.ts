@@ -77,6 +77,7 @@ export const META_TOOLS: Tool[] = [
           description: "HTTP headers for URL-based server (e.g., { Authorization: 'Bearer ...' })",
         },
       },
+      // Mutual exclusivity of command vs url is enforced at runtime in handleMetaTool
       required: ["name"],
     },
     annotations: { idempotentHint: true },

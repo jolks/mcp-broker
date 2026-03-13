@@ -1,8 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { type ServerRecord, isUrlServer } from "./store.js";
-import { createStdioTransport, createUrlTransport } from "./transport.js";
+import { type ServerRecord, type UrlServerRecord, isUrlServer } from "./store.js";
+import { createStdioTransport, createStreamableTransport, createSseTransport } from "./transport.js";
 import { logger } from "./logger.js";
 import { VERSION, SERVER_NAME, CONNECT_TIMEOUT_MS, INITIAL_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_MS, MAX_RECONNECT_ATTEMPTS, raceTimeout } from "./config.js";
 
@@ -23,13 +22,20 @@ export class Pool {
       return this.entries.get(server.name)!.client;
     }
 
-    const transport = isUrlServer(server)
-      ? await this.connectUrl(server)
-      : createStdioTransport(server);
+    let client: Client;
+    let transport: Transport;
 
-    const client = new Client(
-      { name: SERVER_NAME, version: VERSION },
-    );
+    if (isUrlServer(server)) {
+      ({ client, transport } = await this.connectUrlWithFallback(server));
+    } else {
+      transport = createStdioTransport(server);
+      client = new Client({ name: SERVER_NAME, version: VERSION });
+      await raceTimeout(
+        client.connect(transport),
+        CONNECT_TIMEOUT_MS,
+        `Connection to "${server.name}" timed out`,
+      );
+    }
 
     // Listen for transport close to attempt reconnect
     transport.onclose = () => {
@@ -43,32 +49,38 @@ export class Pool {
       logger.error(`Transport error for "${server.name}": ${err.message}`);
     };
 
-    await raceTimeout(
-      client.connect(transport),
-      CONNECT_TIMEOUT_MS,
-      `Connection to "${server.name}" timed out`
-    );
-
     this.entries.set(server.name, { client, transport });
     logger.info(`Connected to server "${server.name}"`);
     return client;
   }
 
   /**
-   * Try Streamable HTTP first; on failure fall back to SSE (per MCP spec).
-   * The fallback happens at the connect level since StreamableHTTPClientTransport
-   * may only fail once the client tries to use it.
+   * Try Streamable HTTP first; on connect failure fall back to SSE (per MCP spec).
    */
-  private async connectUrl(server: import("./store.js").UrlServerRecord): Promise<Transport> {
+  private async connectUrlWithFallback(server: UrlServerRecord): Promise<PoolEntry> {
+    let transport: Transport = createStreamableTransport(server);
+    let client = new Client({ name: SERVER_NAME, version: VERSION });
+
     try {
-      return await createUrlTransport(server);
+      await raceTimeout(
+        client.connect(transport),
+        CONNECT_TIMEOUT_MS,
+        `Connection to "${server.name}" timed out`,
+      );
+      return { client, transport };
     } catch {
       logger.info(`Streamable HTTP failed for "${server.name}", trying SSE`);
-      const url = new URL(server.url);
-      return new SSEClientTransport(url, {
-        requestInit: server.headers ? { headers: server.headers } : undefined,
-      });
+      try { await transport.close(); } catch { /* best-effort */ }
     }
+
+    transport = createSseTransport(server);
+    client = new Client({ name: SERVER_NAME, version: VERSION });
+    await raceTimeout(
+      client.connect(transport),
+      CONNECT_TIMEOUT_MS,
+      `Connection to "${server.name}" timed out (SSE fallback)`,
+    );
+    return { client, transport };
   }
 
   async connectAll(servers: ServerRecord[]): Promise<void> {

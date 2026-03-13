@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { readConfig, backupConfig, rewriteConfigForBroker, restoreConfig, listKnownConfigPaths, addBrokerToConfig, hasBrokerEntry, buildBrokerEntry, isUrlEntry } from "../src/client-config.js";
+import { readConfig, backupConfig, rewriteConfigForBroker, restoreConfig, listKnownConfigPaths, addBrokerToConfig, hasBrokerEntry, buildBrokerEntry, isUrlEntry, entryToRecord, recordToEntry } from "../src/client-config.js";
 
 describe("config", () => {
   let tmpDir: string;
@@ -293,6 +293,72 @@ describe("config", () => {
       expect(() =>
         restoreConfig(join(tmpDir, "nope.bak"), join(tmpDir, "target.json"))
       ).toThrow(/Backup not found/);
+    });
+  });
+
+  // ── entryToRecord ─────────────────────────────────────
+
+  describe("entryToRecord", () => {
+    it("converts stdio entry to StdioServerRecord", () => {
+      const record = entryToRecord("srv", { command: "npx", args: ["@mcp/github"], env: { TOKEN: "abc" } });
+      expect(record).toEqual({ name: "srv", command: "npx", args: ["@mcp/github"], env: { TOKEN: "abc" } });
+    });
+
+    it("defaults args to empty array when missing", () => {
+      const record = entryToRecord("srv", { command: "node" });
+      expect(record).toEqual({ name: "srv", command: "node", args: [], env: undefined });
+    });
+
+    it("converts URL entry to UrlServerRecord", () => {
+      const record = entryToRecord("srv", { url: "https://example.com/mcp", headers: { Authorization: "Bearer tok" } });
+      expect(record).toEqual({ name: "srv", url: "https://example.com/mcp", headers: { Authorization: "Bearer tok" } });
+    });
+
+    it("converts URL entry without headers", () => {
+      const record = entryToRecord("srv", { url: "https://example.com/mcp" });
+      expect(record).toEqual({ name: "srv", url: "https://example.com/mcp", headers: undefined });
+    });
+
+    it("warns and prefers URL when entry has both url and command", async () => {
+      const { logger } = await import("../src/logger.js");
+      const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+      const entry = { url: "https://example.com/mcp", command: "npx", args: ["@mcp/github"] } as any;
+      const record = entryToRecord("srv", entry);
+
+      expect("url" in record).toBe(true);
+      expect("command" in record).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("both url and command"));
+
+      warnSpy.mockRestore();
+    });
+  });
+
+  // ── recordToEntry ─────────────────────────────────────
+
+  describe("recordToEntry", () => {
+    it("converts StdioServerRecord to StdioServerEntry", () => {
+      const entry = recordToEntry({ name: "srv", command: "npx", args: ["@mcp/github"], env: { TOKEN: "abc" } });
+      expect(entry).toEqual({ command: "npx", args: ["@mcp/github"], env: { TOKEN: "abc" } });
+    });
+
+    it("converts UrlServerRecord to UrlServerEntry", () => {
+      const entry = recordToEntry({ name: "srv", url: "https://example.com/mcp", headers: { Authorization: "Bearer tok" } });
+      expect(entry).toEqual({ url: "https://example.com/mcp", headers: { Authorization: "Bearer tok" } });
+    });
+
+    it("round-trips stdio record through entry and back", () => {
+      const original = { name: "srv", command: "node", args: ["server.js"], env: { KEY: "val" } };
+      const entry = recordToEntry(original);
+      const roundTripped = entryToRecord("srv", entry);
+      expect(roundTripped).toEqual(original);
+    });
+
+    it("round-trips URL record through entry and back", () => {
+      const original = { name: "srv", url: "https://example.com/mcp", headers: { Auth: "tok" } };
+      const entry = recordToEntry(original);
+      const roundTripped = entryToRecord("srv", entry);
+      expect(roundTripped).toEqual(original);
     });
   });
 

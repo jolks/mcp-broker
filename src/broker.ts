@@ -5,7 +5,7 @@ import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
 import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS, DEFAULT_SEARCH_LIMIT } from "./config.js";
-import { type McpServerEntry, isUrlEntry } from "./client-config.js";
+import { type McpServerEntry, entryToRecord, recordToEntry } from "./client-config.js";
 
 export interface ToolInvocation {
   server_name: string;
@@ -158,16 +158,9 @@ export class Broker {
 
   // ── Server Management ─────────────────────────────────
 
-  private toRegistryEntry(server: ServerRecord): McpServerEntry {
-    if (isUrlServer(server)) {
-      return { url: server.url, headers: server.headers };
-    }
-    return { command: server.command, args: server.args, env: server.env };
-  }
-
   async addServer(server: ServerRecord): Promise<{ toolCount: number }> {
     // Write to registry first (source of truth)
-    this.registry.addServer(server.name, this.toRegistryEntry(server));
+    this.registry.addServer(server.name, recordToEntry(server));
 
     this.store.upsertServer(server);
 
@@ -244,7 +237,7 @@ export class Broker {
     }
 
     // Write to registry (source of truth) and store
-    this.registry.addServer(name, this.toRegistryEntry(merged));
+    this.registry.addServer(name, recordToEntry(merged));
     this.store.upsertServer(merged);
 
     // Disconnect, re-harvest, reconnect
@@ -270,7 +263,7 @@ export class Broker {
 
     for (const { name, entry } of servers) {
       try {
-        const tools = await harvestTools(this.entryToRecord(name, entry));
+        const tools = await harvestTools(entryToRecord(name, entry));
         this.store.upsertTools(name, tools);
       } catch (err) {
         logger.error(`Failed to refresh tools for "${name}": ${err}`);
@@ -286,7 +279,7 @@ export class Broker {
   ): Promise<void> {
     const results = await Promise.allSettled(
       servers.map(async ({ name, entry }) => {
-        const tools = await harvestTools(this.entryToRecord(name, entry));
+        const tools = await harvestTools(entryToRecord(name, entry));
         return { name, tools };
       })
     );
@@ -300,13 +293,6 @@ export class Broker {
     }
   }
 
-  private entryToRecord(name: string, entry: McpServerEntry): ServerRecord {
-    if (isUrlEntry(entry)) {
-      return { name, url: entry.url, headers: entry.headers };
-    }
-    return { name, command: entry.command, args: entry.args ?? [], env: entry.env };
-  }
-
   // ── Lifecycle ─────────────────────────────────────────
 
   async startup(): Promise<void> {
@@ -318,7 +304,7 @@ export class Broker {
       logger.info("Migrating servers from SQLite to servers.json");
       const toImport: Record<string, McpServerEntry> = {};
       for (const s of storeServers) {
-        toImport[s.name] = this.toRegistryEntry(s);
+        toImport[s.name] = recordToEntry(s);
       }
       this.registry.importServers(toImport);
     }
@@ -330,7 +316,7 @@ export class Broker {
     // Sync to SQLite in a single transaction: upsert all from registry, remove stale entries
     this.store.runInTransaction(() => {
       for (const { name, entry } of entries) {
-        this.store.upsertServer(this.entryToRecord(name, entry));
+        this.store.upsertServer(entryToRecord(name, entry));
       }
       for (const s of storeServers) {
         if (!registryNames.has(s.name)) {

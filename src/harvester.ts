@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { type ServerRecord, isUrlServer } from "./store.js";
-import { createStdioTransport, createUrlTransport } from "./transport.js";
+import { createStdioTransport, createStreamableTransport, createSseTransport } from "./transport.js";
 import { logger } from "./logger.js";
 import { VERSION, HARVESTER_NAME, HARVEST_TIMEOUT_MS, raceTimeout } from "./config.js";
 
@@ -12,25 +12,62 @@ export interface HarvestedTool {
   input_schema: string; // JSON string
 }
 
-export async function harvestTools(
-  server: ServerRecord
-): Promise<HarvestedTool[]> {
-  let transport: Transport | undefined;
-  const label = isUrlServer(server) ? server.url : `${server.command} ${server.args.join(" ")}`;
-
-  try {
-    transport = isUrlServer(server)
-      ? await createUrlTransport(server)
-      : createStdioTransport(server);
-
+/**
+ * Connect a URL-based server with Streamable HTTP → SSE fallback.
+ * Returns the connected client and transport for cleanup.
+ */
+async function connectForHarvest(
+  server: ServerRecord,
+  label: string,
+): Promise<{ client: Client; transport: Transport }> {
+  if (!isUrlServer(server)) {
+    const transport = createStdioTransport(server);
     const client = new Client({ name: HARVESTER_NAME, version: VERSION });
-
-    // Race against timeout
     await raceTimeout(
       client.connect(transport),
       HARVEST_TIMEOUT_MS,
-      `Connecting to ${label} timed out`
+      `Connecting to ${label} timed out`,
     );
+    return { client, transport };
+  }
+
+  // Try Streamable HTTP first
+  let transport: Transport = createStreamableTransport(server);
+  let client = new Client({ name: HARVESTER_NAME, version: VERSION });
+
+  try {
+    await raceTimeout(
+      client.connect(transport),
+      HARVEST_TIMEOUT_MS,
+      `Connecting to ${label} timed out`,
+    );
+    return { client, transport };
+  } catch {
+    logger.info(`Streamable HTTP failed for "${server.name}", trying SSE`);
+    try { await transport.close(); } catch { /* best-effort */ }
+  }
+
+  // Fall back to SSE
+  transport = createSseTransport(server);
+  client = new Client({ name: HARVESTER_NAME, version: VERSION });
+  await raceTimeout(
+    client.connect(transport),
+    HARVEST_TIMEOUT_MS,
+    `Connecting to ${label} timed out (SSE fallback)`,
+  );
+  return { client, transport };
+}
+
+export async function harvestTools(
+  server: ServerRecord
+): Promise<HarvestedTool[]> {
+  const label = isUrlServer(server) ? server.url : `${server.command} ${server.args.join(" ")}`;
+  let transport: Transport | undefined;
+
+  try {
+    const connected = await connectForHarvest(server, label);
+    const client = connected.client;
+    transport = connected.transport;
 
     // Collect all tools with pagination
     const allTools: Tool[] = [];

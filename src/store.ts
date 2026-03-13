@@ -116,25 +116,28 @@ export class Store {
     const hasUrl = columns.some((c) => c.name === "url");
     if (hasUrl) return;
 
-    // Recreate the table to drop NOT NULL from command and add url/headers
-    this.db.exec(`
-      BEGIN;
-      CREATE TABLE servers_new (
-        name TEXT PRIMARY KEY,
-        command TEXT,
-        args TEXT NOT NULL DEFAULT '[]',
-        env TEXT,
-        url TEXT,
-        headers TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
-      );
-      INSERT INTO servers_new (name, command, args, env, created_at, updated_at)
-        SELECT name, command, args, env, created_at, updated_at FROM servers;
-      DROP TABLE servers;
-      ALTER TABLE servers_new RENAME TO servers;
-      COMMIT;
-    `);
+    // Recreate the table to drop NOT NULL from command and add url/headers.
+    // Uses db.transaction() for automatic rollback on failure.
+    this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE servers_new (
+          name TEXT PRIMARY KEY,
+          command TEXT,
+          args TEXT NOT NULL DEFAULT '[]',
+          env TEXT,
+          url TEXT,
+          headers TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      this.db.exec(`
+        INSERT INTO servers_new (name, command, args, env, created_at, updated_at)
+          SELECT name, command, args, env, created_at, updated_at FROM servers;
+      `);
+      this.db.exec("DROP TABLE servers;");
+      this.db.exec("ALTER TABLE servers_new RENAME TO servers;");
+    })();
     logger.info("Migrated servers table to support URL-based servers");
   }
 

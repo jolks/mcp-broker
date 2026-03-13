@@ -2,12 +2,11 @@
 
 import { Command } from "commander";
 import { Store } from "./store.js";
-import type { ServerRecord } from "./store.js";
 import { Pool } from "./pool.js";
 import { Broker } from "./broker.js";
 import { Registry } from "./registry.js";
 import { startServer } from "./server.js";
-import { detectConfigFiles, listBackups, restoreConfig, readConfig, listKnownConfigPaths, hasBrokerEntry, isUrlEntry } from "./client-config.js";
+import { detectConfigFiles, listBackups, restoreConfig, readConfig, listKnownConfigPaths, hasBrokerEntry, entryToRecord } from "./client-config.js";
 import { setupFromConfig } from "./setup.js";
 import { promptAndRewriteConfigs, type ConfigCandidate } from "./setup-rewrite.js";
 import { harvestTools } from "./harvester.js";
@@ -271,10 +270,7 @@ program
       for (const { name, entry } of servers) {
         console.log(`Refreshing "${name}"...`);
         try {
-          const record: ServerRecord = isUrlEntry(entry)
-            ? { name, url: entry.url, headers: entry.headers }
-            : { name, command: entry.command, args: entry.args ?? [], env: entry.env };
-          const tools = await harvestTools(record);
+          const tools = await harvestTools(entryToRecord(name, entry));
           store.upsertTools(name, tools);
           console.log(`  ${tools.length} tools`);
         } catch (err) {

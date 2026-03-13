@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 import { Store } from "../src/store.js";
 import { makeServer, makeUrlServer } from "./helpers.js";
 
@@ -332,6 +336,85 @@ describe("Store", () => {
       expect(store.getToolCount("b")).toBe(1);
       const results = store.searchTools("tb");
       expect(results.length).toBe(1);
+    });
+  });
+
+  // ── DB migration ──────────────────────────────────────
+
+  describe("migrateUrlColumns", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), "mcp-broker-migration-test-"));
+    });
+
+    function createOldSchemaDb(dbPath: string): void {
+      const db = new Database(dbPath);
+      db.pragma("journal_mode = WAL");
+      db.exec(`
+        CREATE TABLE servers (
+          name TEXT PRIMARY KEY,
+          command TEXT NOT NULL,
+          args TEXT NOT NULL DEFAULT '[]',
+          env TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`
+        CREATE TABLE tools (
+          id TEXT PRIMARY KEY,
+          server_name TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          input_schema TEXT NOT NULL DEFAULT '{}',
+          harvested_at TEXT DEFAULT (datetime('now')),
+          FOREIGN KEY (server_name) REFERENCES servers(name) ON DELETE CASCADE
+        );
+      `);
+      db.prepare("INSERT INTO servers (name, command, args) VALUES (?, ?, ?)").run(
+        "legacy", "node", '["old-server.js"]'
+      );
+      db.close();
+    }
+
+    it("migrates old schema and preserves existing stdio data", () => {
+      const dbPath = join(tmpDir, "migrate.db");
+      createOldSchemaDb(dbPath);
+
+      const newStore = new Store(dbPath);
+      const server = newStore.getServer("legacy");
+      expect(server).toBeDefined();
+      expect("command" in server!).toBe(true);
+      expect(server!.command).toBe("node");
+      newStore.close();
+    });
+
+    it("is idempotent — already-migrated DB does not break", () => {
+      const dbPath = join(tmpDir, "idempotent.db");
+      createOldSchemaDb(dbPath);
+
+      // First open triggers migration
+      const store1 = new Store(dbPath);
+      store1.close();
+
+      // Second open should not throw
+      const store2 = new Store(dbPath);
+      const server = store2.getServer("legacy");
+      expect(server).toBeDefined();
+      store2.close();
+    });
+
+    it("can insert URL server after migration", () => {
+      const dbPath = join(tmpDir, "url-after-migrate.db");
+      createOldSchemaDb(dbPath);
+
+      const newStore = new Store(dbPath);
+      newStore.upsertServer(makeUrlServer({ name: "remote", url: "https://example.com/mcp" }));
+      const got = newStore.getServer("remote");
+      expect(got).toBeDefined();
+      expect("url" in got!).toBe(true);
+      newStore.close();
     });
   });
 });

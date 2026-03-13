@@ -3,7 +3,7 @@ import { Broker } from "../src/broker.js";
 import type { Store, SearchResult } from "../src/store.js";
 import type { Pool } from "../src/pool.js";
 import type { Registry } from "../src/registry.js";
-import { makeServer, makeStore, makePool, makeRegistry } from "./helpers.js";
+import { makeServer, makeUrlServer, makeStore, makePool, makeRegistry } from "./helpers.js";
 
 // Mock harvester
 vi.mock("../src/harvester.js", () => ({
@@ -472,6 +472,70 @@ describe("Broker", () => {
 
       await expect(broker.updateServer("missing", { command: "x" }))
         .rejects.toThrow('Server "missing" not found');
+    });
+
+    it("switches from stdio to URL", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeServer({ name: "srv", command: "node", args: ["old.js"] })
+      );
+      mockHarvestTools.mockResolvedValue([]);
+
+      await broker.updateServer("srv", { url: "https://example.com/mcp", headers: { Auth: "tok" } });
+
+      expect(store.upsertServer).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", url: "https://example.com/mcp", headers: { Auth: "tok" } })
+      );
+      // Should NOT contain command
+      const upsertArg = vi.mocked(store.upsertServer).mock.calls[0][0];
+      expect("command" in upsertArg).toBe(false);
+    });
+
+    it("switches from URL to stdio", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeUrlServer({ name: "srv", url: "https://old.example.com/mcp" })
+      );
+      mockHarvestTools.mockResolvedValue([]);
+
+      await broker.updateServer("srv", { command: "deno", args: ["new.ts"] });
+
+      expect(store.upsertServer).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", command: "deno", args: ["new.ts"] })
+      );
+      const upsertArg = vi.mocked(store.upsertServer).mock.calls[0][0];
+      expect("url" in upsertArg).toBe(false);
+    });
+
+    it("updates URL headers only", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeUrlServer({ name: "srv", url: "https://example.com/mcp", headers: { Old: "header" } })
+      );
+      mockHarvestTools.mockResolvedValue([]);
+
+      await broker.updateServer("srv", { headers: { New: "header" } });
+
+      expect(store.upsertServer).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", url: "https://example.com/mcp", headers: { New: "header" } })
+      );
+    });
+
+    it("type switch lifecycle: disconnect, re-harvest, reconnect", async () => {
+      vi.mocked(store.getServer).mockReturnValue(
+        makeServer({ name: "srv", command: "node", args: [] })
+      );
+      mockHarvestTools.mockResolvedValue([
+        { tool_name: "t1", description: "T1", input_schema: "{}" },
+      ]);
+
+      await broker.updateServer("srv", { url: "https://example.com/mcp" });
+
+      expect(pool.disconnectServer).toHaveBeenCalledWith("srv");
+      expect(mockHarvestTools).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "srv", url: "https://example.com/mcp" })
+      );
+      expect(store.upsertTools).toHaveBeenCalledWith("srv", [
+        { tool_name: "t1", description: "T1", input_schema: "{}" },
+      ]);
+      expect(pool.connectServer).toHaveBeenCalled();
     });
   });
 
