@@ -50,6 +50,22 @@ export interface SearchResult {
   rank: number;
 }
 
+function serversTableSql(tableName: string = "servers"): string {
+  return `CREATE TABLE IF NOT EXISTS ${tableName} (
+    name TEXT PRIMARY KEY,
+    command TEXT,
+    args TEXT NOT NULL DEFAULT '[]',
+    env TEXT,
+    url TEXT,
+    headers TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    -- command vs url mutual exclusivity enforced at DB level
+    CHECK (command IS NOT NULL OR url IS NOT NULL),
+    CHECK (NOT (command IS NOT NULL AND url IS NOT NULL))
+  )`;
+}
+
 export class Store {
   private db: Database.Database;
 
@@ -71,19 +87,7 @@ export class Store {
 
   private migrate(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS servers (
-        name TEXT PRIMARY KEY,
-        command TEXT,
-        args TEXT NOT NULL DEFAULT '[]',
-        env TEXT,
-        url TEXT,
-        headers TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now')),
-        -- command vs url mutual exclusivity enforced at DB level
-        CHECK (command IS NOT NULL OR url IS NOT NULL),
-        CHECK (NOT (command IS NOT NULL AND url IS NOT NULL))
-      );
+      ${serversTableSql()};
 
       CREATE TABLE IF NOT EXISTS tools (
         id TEXT PRIMARY KEY,
@@ -122,21 +126,7 @@ export class Store {
     // Recreate the table to drop NOT NULL from command and add url/headers.
     // Uses db.transaction() for automatic rollback on failure.
     this.db.transaction(() => {
-      this.db.exec(`
-        CREATE TABLE servers_new (
-          name TEXT PRIMARY KEY,
-          command TEXT,
-          args TEXT NOT NULL DEFAULT '[]',
-          env TEXT,
-          url TEXT,
-          headers TEXT,
-          created_at TEXT DEFAULT (datetime('now')),
-          updated_at TEXT DEFAULT (datetime('now')),
-          -- command vs url mutual exclusivity enforced at DB level
-          CHECK (command IS NOT NULL OR url IS NOT NULL),
-          CHECK (NOT (command IS NOT NULL AND url IS NOT NULL))
-        );
-      `);
+      this.db.exec(serversTableSql("servers_new") + ";");
       this.db.exec(`
         INSERT INTO servers_new (name, command, args, env, created_at, updated_at)
           SELECT name, command, args, env, created_at, updated_at FROM servers;

@@ -261,14 +261,7 @@ export class Broker {
       ? entries.filter((e) => e.name === serverName)
       : entries;
 
-    for (const { name, entry } of servers) {
-      try {
-        const tools = await harvestTools(entryToRecord(name, entry));
-        this.store.upsertTools(name, tools);
-      } catch (err) {
-        logger.error(`Failed to refresh tools for "${name}": ${err}`);
-      }
-    }
+    await this.harvestAndStoreAll(servers, "Refresh");
   }
 
   // ── Harvest helper ──────────────────────────────────────
