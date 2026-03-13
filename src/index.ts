@@ -20,7 +20,6 @@ async function promptForConfigPath(rl: Interface): Promise<string> {
   const answer = await new Promise<string>((resolve) => {
     rl.question("Config path: ", resolve);
   });
-  rl.close();
 
   const trimmed = answer.trim();
   if (!trimmed) {
@@ -78,6 +77,7 @@ program
 
     let resolvedPath: string;
     let selectedClientName: string | undefined;
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
 
     if (configPath) {
       resolvedPath = configPath;
@@ -91,7 +91,6 @@ program
         console.log("  - Windsurf (~/.codeium/windsurf/mcp_config.json)");
         console.log("  - Claude Code (.mcp.json, ~/.claude.json)");
 
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
         resolvedPath = await promptForConfigPath(rl);
       } else if (detected.length === 1) {
         resolvedPath = detected[0].path;
@@ -108,7 +107,6 @@ program
         const customOptionNum = detected.length + 1;
         console.log(`  ${customOptionNum}. Enter custom path`);
 
-        const rl = createInterface({ input: process.stdin, output: process.stdout });
         const answer = await new Promise<string>((resolve) => {
           rl.question(`\nSelect [1-${customOptionNum}]: `, resolve);
         });
@@ -123,7 +121,6 @@ program
         if (idx === detected.length) {
           resolvedPath = await promptForConfigPath(rl);
         } else {
-          rl.close();
           resolvedPath = detected[idx].path;
           selectedClientName = detected[idx].clientName;
         }
@@ -190,14 +187,12 @@ program
         }
 
         if (candidates.length > 0) {
-          const rl = createInterface({ input: process.stdin, output: process.stdout });
           const io = {
             ask: (question: string) => new Promise<string>((resolve) => rl.question(question, resolve)),
             log: (message: string) => console.log(message),
           };
 
           const rewriteResult = await promptAndRewriteConfigs(candidates, io);
-          rl.close();
 
           // Print results
           if (rewriteResult.configured.length > 0 || rewriteResult.errors.length > 0) {
@@ -216,7 +211,12 @@ program
       }
     } finally {
       store.close();
+      rl.close();
     }
+    // readline puts process.stdin into flowing mode on a TTY, which keeps
+    // the event loop alive indefinitely even after rl.close(). Force exit
+    // since all cleanup (store.close, rl.close) is complete.
+    process.exit(0);
   });
 
 // ── list ───────────────────────────────────────────────
