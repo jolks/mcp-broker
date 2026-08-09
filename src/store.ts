@@ -2,10 +2,10 @@ import Database from "better-sqlite3";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import { logger } from "./logger.js";
-import { dbPath as defaultDbPath, FILE_PERMISSION, TOOL_PREFIX_SEPARATOR, DEFAULT_SEARCH_LIMIT } from "./config.js";
+import { dbPath as defaultDbPath, FILE_PERMISSION, TOOL_PREFIX_SEPARATOR } from "./config.js";
 
 /** Build prefixed tool name: "server__tool" */
-function prefixToolName(serverName: string, toolName: string): string {
+export function prefixToolName(serverName: string, toolName: string): string {
   return `${serverName}${TOOL_PREFIX_SEPARATOR}${toolName}`;
 }
 
@@ -36,18 +36,19 @@ export interface ToolRecord {
   input_schema: string; // JSON string
 }
 
-export interface ToolSummary {
+export interface ToolListing {
+  server_name: string;
   tool_name: string;
   description: string;
 }
 
-export interface SearchResult {
-  id: string;
+export interface ToolRef {
   server_name: string;
   tool_name: string;
-  description: string;
+}
+
+export interface ToolDetail extends ToolListing {
   input_schema: object;
-  rank: number;
 }
 
 function serversTableSql(tableName: string = "servers"): string {
@@ -103,18 +104,8 @@ export class Store {
     // Migrate existing DBs: add url/headers columns and relax command NOT NULL
     this.migrateUrlColumns();
 
-    // FTS5 virtual table — CREATE VIRTUAL TABLE is not IF NOT EXISTS compatible in all SQLite versions
-    const ftsExists = this.db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tools_fts'")
-      .get();
-    if (!ftsExists) {
-      this.db.exec(`
-        CREATE VIRTUAL TABLE tools_fts USING fts5(
-          id, tool_name, description, server_name,
-          tokenize='porter unicode61'
-        );
-      `);
-    }
+    // Drop legacy FTS5 index (search was replaced by list_tools/describe_tools)
+    this.db.exec("DROP TABLE IF EXISTS tools_fts;");
   }
 
   private migrateUrlColumns(): void {
@@ -191,9 +182,7 @@ export class Store {
   }
 
   removeServer(name: string): void {
-    // Must delete from FTS explicitly (CASCADE doesn't apply to virtual tables)
     this.runInTransaction(() => {
-      this.db.prepare("DELETE FROM tools_fts WHERE server_name = ?").run(name);
       this.db.prepare("DELETE FROM tools WHERE server_name = ?").run(name);
       this.db.prepare("DELETE FROM servers WHERE name = ?").run(name);
     });
@@ -220,29 +209,21 @@ export class Store {
   upsertTools(serverName: string, tools: Omit<ToolRecord, "id" | "server_name">[]): void {
     this.runInTransaction(() => {
       // Remove old tools for this server
-      this.db.prepare("DELETE FROM tools_fts WHERE server_name = ?").run(serverName);
       this.db.prepare("DELETE FROM tools WHERE server_name = ?").run(serverName);
 
       const insertTool = this.db.prepare(
         `INSERT INTO tools (id, server_name, tool_name, description, input_schema, harvested_at)
          VALUES (@id, @server_name, @tool_name, @description, @input_schema, datetime('now'))`
       );
-      const insertFts = this.db.prepare(
-        `INSERT INTO tools_fts (id, tool_name, description, server_name)
-         VALUES (@id, @tool_name, @description, @server_name)`
-      );
 
       for (const tool of tools) {
-        const id = prefixToolName(serverName, tool.tool_name);
-        const params = {
-          id,
+        insertTool.run({
+          id: prefixToolName(serverName, tool.tool_name),
           server_name: serverName,
           tool_name: tool.tool_name,
           description: tool.description,
           input_schema: tool.input_schema,
-        };
-        insertTool.run(params);
-        insertFts.run(params);
+        });
       }
     });
     logger.info(`Indexed ${tools.length} tools for server "${serverName}"`);
@@ -255,10 +236,36 @@ export class Store {
     return row.cnt;
   }
 
-  getToolsForServer(serverName: string): ToolSummary[] {
+  listAllTools(serverNames?: string[]): ToolListing[] {
+    if (serverNames && serverNames.length > 0) {
+      const placeholders = serverNames.map(() => "?").join(", ");
+      return this.db
+        .prepare(
+          `SELECT server_name, tool_name, description FROM tools
+           WHERE server_name IN (${placeholders})
+           ORDER BY server_name, tool_name`
+        )
+        .all(...serverNames) as ToolListing[];
+    }
     return this.db
-      .prepare("SELECT tool_name, description FROM tools WHERE server_name = ? ORDER BY tool_name")
-      .all(serverName) as ToolSummary[];
+      .prepare("SELECT server_name, tool_name, description FROM tools ORDER BY server_name, tool_name")
+      .all() as ToolListing[];
+  }
+
+  getToolDetails(refs: ToolRef[]): ToolDetail[] {
+    const stmt = this.db.prepare(
+      "SELECT server_name, tool_name, description, input_schema FROM tools WHERE id = ?"
+    );
+    const details: ToolDetail[] = [];
+    for (const ref of refs) {
+      const row = stmt.get(prefixToolName(ref.server_name, ref.tool_name)) as
+        | { server_name: string; tool_name: string; description: string; input_schema: string }
+        | undefined;
+      if (row) {
+        details.push({ ...row, input_schema: JSON.parse(row.input_schema) as object });
+      }
+    }
+    return details;
   }
 
   getLastHarvestedAt(serverName: string): string | undefined {
@@ -266,54 +273,6 @@ export class Store {
       .prepare("SELECT harvested_at FROM tools WHERE server_name = ? ORDER BY harvested_at DESC LIMIT 1")
       .get(serverName) as { harvested_at: string } | undefined;
     return row?.harvested_at;
-  }
-
-  // ── FTS5 Search ──────────────────────────────────────────
-
-  searchTools(query: string, limit: number = DEFAULT_SEARCH_LIMIT): SearchResult[] {
-    const sanitized = this.sanitizeFtsQuery(query);
-    if (!sanitized) return [];
-
-    const rows = this.db
-      .prepare(
-        `SELECT f.id, f.tool_name, f.description, f.server_name,
-                bm25(tools_fts, 0, 2, 5, 1) AS rank, t.input_schema
-         FROM tools_fts f
-         JOIN tools t ON t.id = f.id
-         WHERE tools_fts MATCH @query
-         ORDER BY rank
-         LIMIT @limit`
-      )
-      .all({ query: sanitized, limit }) as Array<{
-      id: string;
-      tool_name: string;
-      description: string;
-      server_name: string;
-      rank: number;
-      input_schema: string;
-    }>;
-
-    return rows.map((row) => ({
-      id: row.id,
-      server_name: row.server_name,
-      tool_name: row.tool_name,
-      description: row.description,
-      input_schema: JSON.parse(row.input_schema),
-      rank: row.rank,
-    }));
-  }
-
-  private sanitizeFtsQuery(query: string): string {
-    // Remove FTS5 special characters to prevent injection, keep alphanumeric and spaces
-    const cleaned = query.replace(/[^\w\s]/g, " ").trim();
-    if (!cleaned) return "";
-    // Convert to prefix search terms with OR semantics for better matching.
-    // LLMs often search for multiple unrelated tool names in one query
-    // (e.g., "browser navigate snapshot close") — AND would require ALL terms
-    // in a single tool, returning nothing. OR finds tools matching ANY term,
-    // with BM25 ranking putting the most relevant matches first.
-    const terms = cleaned.split(/\s+/).filter(Boolean);
-    return terms.map((t) => `"${t}"*`).join(" OR ");
   }
 
   // ── Transaction ──────────────────────────────────────────

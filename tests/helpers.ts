@@ -23,14 +23,14 @@ export function makeUrlServer(overrides: Partial<UrlServerRecord> = {}): UrlServ
 
 export function makeStore(): Store {
   return {
-    searchTools: vi.fn(),
     upsertServer: vi.fn(),
     upsertTools: vi.fn(),
     getServer: vi.fn(),
     listServers: vi.fn(() => []),
     removeServer: vi.fn(),
     getToolCount: vi.fn(() => 0),
-    getToolsForServer: vi.fn(() => []),
+    listAllTools: vi.fn(() => []),
+    getToolDetails: vi.fn(() => []),
     getLastHarvestedAt: vi.fn(() => undefined),
     runInTransaction: vi.fn((fn: () => void) => fn()),
     close: vi.fn(),

@@ -1,10 +1,10 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Store, type ServerRecord, type SearchResult, type ToolSummary, isUrlServer } from "./store.js";
+import { Store, type ServerRecord, type ToolListing, type ToolRef, type ToolDetail, isUrlServer, prefixToolName } from "./store.js";
 import { Pool } from "./pool.js";
 import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
-import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS, DEFAULT_SEARCH_LIMIT } from "./config.js";
+import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS } from "./config.js";
 import { type McpServerEntry, entryToRecord, recordToEntry } from "./client-config.js";
 
 export interface ToolInvocation {
@@ -25,17 +25,11 @@ export interface CallToolsOptions {
   sequential?: boolean;
 }
 
-export interface ServerDetail {
+export interface ServerSummary {
   name: string;
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
   connected: boolean;
   toolCount: number;
-  tools: ToolSummary[];
-  version?: string;
+  source: string; // launch command for stdio servers, URL for URL servers
 }
 
 export class Broker {
@@ -50,24 +44,19 @@ export class Broker {
     this.registry = registry;
   }
 
-  // ── Search ─────────────────────────────────────────────
+  // ── Discovery ──────────────────────────────────────────
 
-  searchTools(query: string, limit?: number): SearchResult[] {
-    return this.store.searchTools(query, limit);
+  listTools(serverNames?: string[]): { tools: ToolListing[]; unknownServers: string[] } {
+    const known = new Set(this.store.listServers().map((s) => s.name));
+    const unknownServers = (serverNames ?? []).filter((n) => !known.has(n));
+    return { tools: this.store.listAllTools(serverNames), unknownServers };
   }
 
-  searchToolsMulti(queries: string[], limit?: number): SearchResult[] {
-    const perQuery = limit ?? DEFAULT_SEARCH_LIMIT;
-    const seen = new Map<string, SearchResult>();
-    for (const query of queries) {
-      for (const result of this.store.searchTools(query, perQuery)) {
-        const existing = seen.get(result.id);
-        if (!existing || result.rank < existing.rank) {
-          seen.set(result.id, result); // keep best rank (BM25: lower = better)
-        }
-      }
-    }
-    return Array.from(seen.values()).sort((a, b) => a.rank - b.rank);
+  describeTools(refs: ToolRef[]): { found: ToolDetail[]; missing: ToolRef[] } {
+    const found = this.store.getToolDetails(refs);
+    const foundIds = new Set(found.map((t) => prefixToolName(t.server_name, t.tool_name)));
+    const missing = refs.filter((r) => !foundIds.has(prefixToolName(r.server_name, r.tool_name)));
+    return { found, missing };
   }
 
   // ── Call Tools ──────────────────────────────────────────
@@ -185,29 +174,15 @@ export class Broker {
     logger.info(`Removed server "${name}"`);
   }
 
-  listServers(): Array<{ name: string; connected: boolean; toolCount: number }> {
+  listServers(): ServerSummary[] {
     const servers = this.store.listServers();
     return servers.map((s) => ({
       name: s.name,
       connected: this.pool.isConnected(s.name),
       toolCount: this.store.getToolCount(s.name),
+      // Env and header values are deliberately excluded (may contain API keys)
+      source: isUrlServer(s) ? s.url : [s.command, ...s.args].join(" "),
     }));
-  }
-
-  getServer(name: string): ServerDetail | undefined {
-    const server = this.store.getServer(name);
-    if (!server) return undefined;
-    const base = {
-      name: server.name,
-      connected: this.pool.isConnected(server.name),
-      toolCount: this.store.getToolCount(server.name),
-      tools: this.store.getToolsForServer(server.name),
-      version: this.pool.getServerVersion(server.name)?.version,
-    };
-    if (isUrlServer(server)) {
-      return { ...base, url: server.url, headers: server.headers };
-    }
-    return { ...base, command: server.command, args: server.args, env: server.env };
   }
 
   async updateServer(name: string, updates: ServerUpdate): Promise<{ toolCount: number }> {

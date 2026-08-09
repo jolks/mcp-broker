@@ -27,15 +27,14 @@ pnpm run lint:fix       # Run ESLint with auto-fix
 
 ## Architecture
 
-mcp-broker is an MCP server that acts as a gateway to many downstream MCP servers. Instead of configuring dozens of MCP servers (flooding the LLM context with hundreds of tool schemas), you configure one: mcp-broker. It exposes 7 fixed meta-tools. The LLM uses `search_tools` to discover tools via FTS5 full-text search, then uses `call_tools` to invoke them.
-
-The LLM uses `search_tools` to discover tools (returns names, descriptions, and input schemas), then uses `call_tools` to invoke them by `server_name` and `tool_name`. `search_tools` accepts either `query` (single string) or `queries` (array of strings for multi-aspect search in one call — each runs independently, results are deduplicated and merged). `call_tools` accepts an array of invocations and executes them in parallel.
+mcp-broker is an MCP server that acts as a gateway to many downstream MCP servers. Instead of configuring dozens of MCP servers (flooding the LLM context with hundreds of tool schemas), you configure one: mcp-broker. It exposes 7 fixed meta-tools. Discovery works like an LLM using CLI tools — browse the command list, read the help, then run: `list_tools` returns a compact one-line-per-tool listing grouped by server (optionally filtered with `server_names`), `describe_tools` returns full input schemas for the specific tools the LLM picked, and `call_tools` invokes them by `server_name` and `tool_name` (array of invocations, parallel by default, `sequential: true` for ordered steps). The LLM does the "search" by reading the list — there is no server-side search index.
 
 ### Data flow
 
 ```
-LLM → search_tools(queries: ["browser navigate", "page title", "browser close"])
-    → FTS5 lookup per query → deduplicated, ranked results
+LLM → list_tools()                    → one compact line per tool, grouped by server
+LLM → describe_tools(tools: [{server_name: "vibium", tool_name: "browser_navigate"}, ...])
+    → full input schemas for just those tools
 LLM → call_tools(invocations: [{server_name: "vibium", tool_name: "browser_navigate", arguments: {...}}, ...])
     → broker → pool.getClient("vibium") → client.callTool("browser_navigate", {...})
     → result passed through to LLM
@@ -44,9 +43,9 @@ LLM → call_tools(invocations: [{server_name: "vibium", tool_name: "browser_nav
 ### Module responsibilities
 
 - **index.ts** — CLI entry point (commander). Creates Store/Pool/Registry/Broker, wires them together.
-- **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 7 meta-tools with annotations. `search_tools` description is dynamically built with actual server names and tool counts via `buildDynamicTools()`. Response text guides the LLM through a discovery cycle: search → list → get → search again.
-- **broker.ts** — Orchestration layer. Owns search (`searchTools` for single query, `searchToolsMulti` for multi-query with dedup), tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
-- **store.ts** — SQLite + FTS5 via better-sqlite3. Tables: `servers`, `tools`, `tools_fts` (virtual). DB at `$MCP_BROKER_HOME/broker.db`. Porter stemming for search. Acts as a rebuildable index.
+- **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 7 meta-tools with annotations. `list_tools` description is dynamically built with actual server names and tool counts via `buildDynamicTools()`. Response text guides the LLM through the discovery loop: list → describe → call. `truncateDescription()` caps listing lines at `LIST_TOOLS_DESCRIPTION_MAX_CHARS`.
+- **broker.ts** — Orchestration layer. Owns discovery (`listTools`, `describeTools`), tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
+- **store.ts** — SQLite via better-sqlite3. Tables: `servers`, `tools`. DB at `$MCP_BROKER_HOME/broker.db`. Plain rebuildable index of harvested tool schemas; a legacy `tools_fts` table is dropped on open.
 - **transport.ts** — Transport creation and URL connection logic. Exports `createStdioTransport()`, `createStreamableTransport()`, `createSseTransport()`, and `connectUrl()` which handles Streamable HTTP → SSE fallback (per MCP spec). Used by both pool and harvester.
 - **pool.ts** — Eager connection manager. Connects to all servers on startup (stdio via `createStdioTransport`, URL via `connectUrl`). Auto-reconnects on disconnect. `Map<serverName, {client, transport}>`.
 - **harvester.ts** — One-shot tool discovery. `harvestTools(server: ServerRecord)` connects to a server (stdio or URL), calls `tools/list` with pagination, collects schemas, shuts down. 30s timeout.
@@ -73,7 +72,6 @@ All imports require `.js` extension even in TypeScript:
 - **`servers.json` is source of truth** — `$MCP_BROKER_HOME/servers.json` is the canonical server registry (pure standard MCP config format). SQLite is a rebuildable index. If the DB is deleted, it is rebuilt from `servers.json` on startup.
 - **`MCP_BROKER_HOME` env var** — overrides the base directory (default `~/.mcp-broker`). All paths are derived from it: `broker.db`, `servers.json`, `backups/`. Used by tests to isolate from `~/.mcp-broker`.
 - **stdout is sacred in `serve`** — the `serve` command uses stdio transport, so all logging there must go to stderr (`logger.ts`). CLI commands (`setup`, `list`, `refresh`, `restore`) are normal terminal programs and use `console.log` for user-facing output freely.
-- **FTS5 query sanitization** — user queries are stripped of special characters and converted to prefix searches to prevent FTS5 injection.
 - **DB permissions** — `broker.db` is chmod 0600 because it may contain env vars with API keys.
 - **Registry permissions** — `servers.json` is chmod 0600 because it may contain env vars with API keys.
 - **Backup before rewrite** — the `setup` command always verifies backup size > 0 before overwriting the original config.

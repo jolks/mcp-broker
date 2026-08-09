@@ -18,6 +18,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "RUN_E2E=1 vitest run tests/e2e-claude.test.ts",
+    "test:e2e:haiku": "RUN_E2E=1 E2E_MODEL=claude-haiku-4-5-20251001 vitest run tests/e2e-claude.test.ts",
+    "test:e2e:gemini": "RUN_E2E=1 vitest run tests/e2e-gemini.test.ts",
     "lint": "eslint src/ tests/",
     "lint:fix": "eslint src/ tests/ --fix"
   },

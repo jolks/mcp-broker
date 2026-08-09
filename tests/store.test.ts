@@ -167,20 +167,20 @@ describe("Store", () => {
       expect(store.getToolCount("srv")).toBe(0);
     });
 
-    it("getToolsForServer returns tool summaries ordered by name", () => {
+    it("listAllTools with filter returns tools ordered by name", () => {
       store.upsertTools("srv", [
         { tool_name: "beta_tool", description: "Beta", input_schema: "{}" },
         { tool_name: "alpha_tool", description: "Alpha", input_schema: "{}" },
       ]);
-      const tools = store.getToolsForServer("srv");
+      const tools = store.listAllTools(["srv"]);
       expect(tools).toEqual([
-        { tool_name: "alpha_tool", description: "Alpha" },
-        { tool_name: "beta_tool", description: "Beta" },
+        { server_name: "srv", tool_name: "alpha_tool", description: "Alpha" },
+        { server_name: "srv", tool_name: "beta_tool", description: "Beta" },
       ]);
     });
 
-    it("getToolsForServer returns empty array for server with no tools", () => {
-      expect(store.getToolsForServer("srv")).toEqual([]);
+    it("listAllTools with filter returns empty array for server with no tools", () => {
+      expect(store.listAllTools(["srv"])).toEqual([]);
     });
 
     it("getLastHarvestedAt returns timestamp for server with tools", () => {
@@ -206,9 +206,9 @@ describe("Store", () => {
         { tool_name: "new", description: "New", input_schema: "{}" },
       ]);
       expect(store.getToolCount("srv")).toBe(1);
-      const results = store.searchTools("new");
-      expect(results.length).toBe(1);
-      expect(results[0].tool_name).toBe("new");
+      const tools = store.listAllTools(["srv"]);
+      expect(tools.length).toBe(1);
+      expect(tools[0].tool_name).toBe("new");
     });
 
     it("handles large schema JSON", () => {
@@ -221,15 +221,15 @@ describe("Store", () => {
       store.upsertTools("srv", [
         { tool_name: "big", description: "Big schema", input_schema: largeSchema },
       ]);
-      const results = store.searchTools("big");
-      expect(results.length).toBe(1);
-      expect(results[0].input_schema).toEqual(JSON.parse(largeSchema));
+      const details = store.getToolDetails([{ server_name: "srv", tool_name: "big" }]);
+      expect(details.length).toBe(1);
+      expect(details[0].input_schema).toEqual(JSON.parse(largeSchema));
     });
   });
 
-  // ── FTS5 Search ──────────────────────────────────────
+  // ── listAllTools ─────────────────────────────────────
 
-  describe("FTS5 search", () => {
+  describe("listAllTools", () => {
     beforeEach(() => {
       store.upsertServer(makeServer({ name: "github" }));
       store.upsertServer(makeServer({ name: "filesystem" }));
@@ -243,89 +243,80 @@ describe("Store", () => {
       ]);
     });
 
-    it("finds tools by keyword", () => {
-      const results = store.searchTools("github");
-      expect(results.length).toBeGreaterThan(0);
-      expect(results.every((r) => r.server_name === "github" || r.description.toLowerCase().includes("github"))).toBe(true);
-    });
-
-    it("finds tools by description keywords", () => {
-      const results = store.searchTools("file");
-      expect(results.length).toBeGreaterThan(0);
-      const toolNames = results.map((r) => r.tool_name);
-      expect(toolNames).toContain("read_file");
-      expect(toolNames).toContain("write_file");
-    });
-
-    it("porter stemming matches inflections", () => {
-      // "creating" should match "create" via porter stemming
-      const results = store.searchTools("creating");
-      expect(results.length).toBeGreaterThan(0);
-      expect(results.some((r) => r.tool_name === "create_issue")).toBe(true);
-    });
-
-    it("returns empty array for no matches", () => {
-      const results = store.searchTools("nonexistent_xyz_tool");
-      expect(results).toEqual([]);
-    });
-
-    it("respects limit parameter", () => {
-      const results = store.searchTools("file", 1);
-      expect(results.length).toBeLessThanOrEqual(1);
-    });
-
-    it("includes input_schema as parsed object", () => {
-      const results = store.searchTools("create_issue");
-      expect(results.length).toBeGreaterThan(0);
-      expect(results[0].input_schema).toEqual({ type: "object" });
-    });
-
-    it("results have rank field", () => {
-      const results = store.searchTools("github");
-      for (const r of results) {
-        expect(typeof r.rank).toBe("number");
-      }
-    });
-
-    it("returns empty array for empty query", () => {
-      expect(store.searchTools("")).toEqual([]);
-    });
-
-    it("returns empty array for query with only special chars", () => {
-      expect(store.searchTools("***")).toEqual([]);
-    });
-  });
-
-  // ── FTS5 sanitization ────────────────────────────────
-
-  describe("FTS5 sanitization", () => {
-    beforeEach(() => {
-      store.upsertServer(makeServer({ name: "srv" }));
-      store.upsertTools("srv", [
-        { tool_name: "test_tool", description: "A test tool", input_schema: "{}" },
+    it("returns all tools ordered by server then tool name", () => {
+      const tools = store.listAllTools();
+      expect(tools.map((t) => `${t.server_name}/${t.tool_name}`)).toEqual([
+        "filesystem/read_file",
+        "filesystem/write_file",
+        "github/create_issue",
+        "github/list_repos",
       ]);
     });
 
-    it("strips special characters from queries", () => {
-      // Should not throw FTS5 syntax error
-      const results = store.searchTools("test AND OR NOT");
-      expect(Array.isArray(results)).toBe(true);
+    it("filters by a single server", () => {
+      const tools = store.listAllTools(["github"]);
+      expect(tools.every((t) => t.server_name === "github")).toBe(true);
+      expect(tools.length).toBe(2);
     });
 
-    it("handles parentheses in queries", () => {
-      expect(() => store.searchTools("test(foo)")).not.toThrow();
+    it("filters by multiple servers", () => {
+      const tools = store.listAllTools(["github", "filesystem"]);
+      expect(tools.length).toBe(4);
     });
 
-    it("handles quotes in queries", () => {
-      expect(() => store.searchTools('"test"')).not.toThrow();
+    it("returns empty array for unknown server filter", () => {
+      expect(store.listAllTools(["nope"])).toEqual([]);
     });
 
-    it("handles asterisks in queries", () => {
-      expect(() => store.searchTools("test*")).not.toThrow();
+    it("returns descriptions but no schemas", () => {
+      const tools = store.listAllTools();
+      expect(tools[0].description).toBeTruthy();
+      expect(tools[0]).not.toHaveProperty("input_schema");
+    });
+  });
+
+  // ── getToolDetails ───────────────────────────────────
+
+  describe("getToolDetails", () => {
+    beforeEach(() => {
+      store.upsertServer(makeServer({ name: "srv" }));
+      store.upsertTools("srv", [
+        { tool_name: "alpha", description: "Alpha tool", input_schema: '{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}' },
+        { tool_name: "beta", description: "Beta tool", input_schema: '{"type":"object"}' },
+      ]);
     });
 
-    it("handles colons in queries", () => {
-      expect(() => store.searchTools("tool:test")).not.toThrow();
+    it("returns parsed input_schema", () => {
+      const details = store.getToolDetails([{ server_name: "srv", tool_name: "alpha" }]);
+      expect(details).toEqual([
+        {
+          server_name: "srv",
+          tool_name: "alpha",
+          description: "Alpha tool",
+          input_schema: { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+        },
+      ]);
+    });
+
+    it("preserves request order", () => {
+      const details = store.getToolDetails([
+        { server_name: "srv", tool_name: "beta" },
+        { server_name: "srv", tool_name: "alpha" },
+      ]);
+      expect(details.map((d) => d.tool_name)).toEqual(["beta", "alpha"]);
+    });
+
+    it("silently omits missing refs", () => {
+      const details = store.getToolDetails([
+        { server_name: "srv", tool_name: "alpha" },
+        { server_name: "srv", tool_name: "nonexistent" },
+        { server_name: "other", tool_name: "alpha" },
+      ]);
+      expect(details.map((d) => d.tool_name)).toEqual(["alpha"]);
+    });
+
+    it("returns empty array for empty refs", () => {
+      expect(store.getToolDetails([])).toEqual([]);
     });
   });
 
@@ -343,15 +334,15 @@ describe("Store", () => {
       expect(store.getToolCount("srv")).toBe(0);
     });
 
-    it("removeServer clears FTS entries", () => {
+    it("removeServer removes tools from the listing", () => {
       store.upsertServer(makeServer({ name: "srv" }));
       store.upsertTools("srv", [
         { tool_name: "unique_tool", description: "A unique tool", input_schema: "{}" },
       ]);
-      expect(store.searchTools("unique_tool").length).toBeGreaterThan(0);
+      expect(store.listAllTools().length).toBe(1);
 
       store.removeServer("srv");
-      expect(store.searchTools("unique_tool")).toEqual([]);
+      expect(store.listAllTools()).toEqual([]);
     });
 
     it("removeServer does not affect other servers", () => {
@@ -362,8 +353,7 @@ describe("Store", () => {
 
       store.removeServer("a");
       expect(store.getToolCount("b")).toBe(1);
-      const results = store.searchTools("tb");
-      expect(results.length).toBe(1);
+      expect(store.listAllTools().map((t) => t.tool_name)).toEqual(["tb"]);
     });
   });
 
@@ -443,6 +433,78 @@ describe("Store", () => {
       expect(got).toBeDefined();
       expect("url" in got!).toBe(true);
       newStore.close();
+    });
+  });
+
+  describe("legacy FTS5 index migration", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), "mcp-broker-fts-migration-test-"));
+    });
+
+    function createDbWithFts(dbPath: string): void {
+      const db = new Database(dbPath);
+      db.pragma("journal_mode = WAL");
+      db.exec(`
+        CREATE TABLE servers (
+          name TEXT PRIMARY KEY,
+          command TEXT,
+          args TEXT NOT NULL DEFAULT '[]',
+          env TEXT,
+          url TEXT,
+          headers TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          CHECK (command IS NOT NULL OR url IS NOT NULL),
+          CHECK (NOT (command IS NOT NULL AND url IS NOT NULL))
+        );
+        CREATE TABLE tools (
+          id TEXT PRIMARY KEY,
+          server_name TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          input_schema TEXT NOT NULL DEFAULT '{}',
+          harvested_at TEXT DEFAULT (datetime('now')),
+          FOREIGN KEY (server_name) REFERENCES servers(name) ON DELETE CASCADE
+        );
+        CREATE VIRTUAL TABLE tools_fts USING fts5(
+          id, tool_name, description, server_name,
+          tokenize='porter unicode61'
+        );
+      `);
+      db.prepare("INSERT INTO servers (name, command) VALUES (?, ?)").run("legacy", "node");
+      db.prepare(
+        "INSERT INTO tools (id, server_name, tool_name, description) VALUES (?, ?, ?, ?)"
+      ).run("legacy__t1", "legacy", "t1", "Tool one");
+      db.prepare(
+        "INSERT INTO tools_fts (id, tool_name, description, server_name) VALUES (?, ?, ?, ?)"
+      ).run("legacy__t1", "t1", "Tool one", "legacy");
+      db.close();
+    }
+
+    it("drops tools_fts and its shadow tables, keeps tools data", () => {
+      const dbPath = join(tmpDir, "fts.db");
+      createDbWithFts(dbPath);
+
+      const newStore = new Store(dbPath);
+      const remaining = (newStore as any).db
+        .prepare("SELECT name FROM sqlite_master WHERE name LIKE 'tools_fts%'")
+        .all() as Array<{ name: string }>;
+      expect(remaining).toEqual([]);
+      expect(newStore.listAllTools()).toEqual([
+        { server_name: "legacy", tool_name: "t1", description: "Tool one" },
+      ]);
+      newStore.close();
+    });
+
+    it("is idempotent on DBs without tools_fts", () => {
+      const dbPath = join(tmpDir, "no-fts.db");
+      const store1 = new Store(dbPath);
+      store1.close();
+      const store2 = new Store(dbPath);
+      expect(store2.listAllTools()).toEqual([]);
+      store2.close();
     });
   });
 });

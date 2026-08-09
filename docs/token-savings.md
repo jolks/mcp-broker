@@ -1,5 +1,7 @@
 # Token Savings Analysis
 
+> **Note (2026-07):** This analysis was written for the previous search-based discovery model (`search_tools` + FTS5). Discovery is now `list_tools` → `describe_tools` → `call_tools`. Fresh measurements (2026-07-10, vibium 85 tools, gemini CLI 0.50) show the savings **no longer hold on modern caching clients**: broker used 8.4% more total tokens (13% more uncached) than direct, because (a) gemini now caches the direct-mode schema block after turn 1, and (b) the broker's discovery adds turns (~13k tokens of CLI baseline context each). Claude Code similarly neutralizes savings via its built-in deferred tool loading (ToolSearch). The math below still applies to clients that resend schemas uncached every turn, and to large registries browsed with the `server_names` filter; treat the concrete numbers as the no-caching upper bound.
+
 mcp-broker saves tokens by replacing **T tool schemas** with **7 fixed meta-tool schemas**. These savings compound on every turn in a conversation because MCP tool schemas are resent with each LLM request.
 
 This doc walks through the math so you can evaluate whether mcp-broker is worth adopting for your setup.

@@ -57,6 +57,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     case "add": {
       const sum = ((args?.a as number) ?? 0) + ((args?.b as number) ?? 0);
+      if (args?.a === 7 && args?.b === 3) {
+        return {
+          content: [{ type: "text", text: `The sum of 7 and 3 is ${sum}` }],
+        };
+      }
       return {
         content: [{ type: "text", text: String(sum) }],
       };

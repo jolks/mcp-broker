@@ -46,9 +46,9 @@ export const MAX_RECONNECT_ATTEMPTS = 10;
 
 export const BACKGROUND_REFRESH_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-// ── Search ──────────────────────────────────────────────
+// ── Tool listing ────────────────────────────────────────
 
-export const DEFAULT_SEARCH_LIMIT = 20;
+export const LIST_TOOLS_DESCRIPTION_MAX_CHARS = 120;
 export const TOOL_PREFIX_SEPARATOR = "__";
 
 // ── Error handling ──────────────────────────────────────
