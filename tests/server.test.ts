@@ -129,6 +129,15 @@ describe("truncateDescription", () => {
     expect(truncateDescription("   \n ")).toBe("(no description)");
     expect(truncateDescription("\n\nbody after blank lines")).toBe("body after blank lines");
   });
+
+  it("does not split a surrogate pair at the cap", () => {
+    // Emoji (2 UTF-16 code units) straddles the truncation point
+    const long = "x".repeat(LIST_TOOLS_DESCRIPTION_MAX_CHARS - 2) + "😀" + "y".repeat(10);
+    const result = truncateDescription(long);
+    expect(result.endsWith("…")).toBe(true);
+    // No lone surrogates anywhere in the output
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(result)).toBe(false);
+  });
 });
 
 describe("handleMetaTool", () => {
@@ -238,6 +247,18 @@ describe("handleMetaTool", () => {
       const text = (result.content[0] as any).text;
       expect(text).toContain("No tools indexed");
       expect(text).toContain("list_mcp_servers");
+    });
+
+    it("names the empty servers when a filter matches no tools", async () => {
+      vi.mocked(broker.listTools).mockReturnValue({ tools: [], unknownServers: ["typo"] });
+
+      const result = await handleMetaTool(broker, "list_tools", { server_names: ["newsrv", "typo"] });
+      expect(result.isError).toBeUndefined();
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("No tools indexed for server(s): newsrv");
+      expect(text).toContain("Unknown server(s): typo");
+      // Must not claim the whole index is empty or suggest re-adding servers
+      expect(text).not.toContain("add_mcp_server");
     });
   });
 
@@ -421,8 +442,8 @@ describe("handleMetaTool", () => {
   describe("list_mcp_servers", () => {
     it("formats server list with source and guides toward list_tools", async () => {
       vi.mocked(broker.listServers).mockReturnValue([
-        { name: "github", connected: true, toolCount: 2, source: "npx -y @mcp/github" },
-        { name: "linear", connected: false, toolCount: 1, source: "https://mcp.linear.app/sse" },
+        { name: "github", connected: true, toolCount: 2, source: "npx -y @mcp/github", envKeys: [], headerKeys: [] },
+        { name: "linear", connected: false, toolCount: 1, source: "https://mcp.linear.app/sse", envKeys: [], headerKeys: [] },
       ]);
 
       const result = await handleMetaTool(broker, "list_mcp_servers", {});
@@ -437,6 +458,18 @@ describe("handleMetaTool", () => {
       expect(text).not.toContain("create_issue");
       // Should guide toward list_tools
       expect(text).toContain("list_tools");
+    });
+
+    it("shows env and header key names but never values", async () => {
+      vi.mocked(broker.listServers).mockReturnValue([
+        { name: "github", connected: true, toolCount: 2, source: "npx -y @mcp/github", envKeys: ["GITHUB_TOKEN", "GITHUB_HOST"], headerKeys: [] },
+        { name: "linear", connected: false, toolCount: 1, source: "https://mcp.linear.app/sse", envKeys: [], headerKeys: ["Authorization"] },
+      ]);
+
+      const result = await handleMetaTool(broker, "list_mcp_servers", {});
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("env keys: GITHUB_TOKEN, GITHUB_HOST");
+      expect(text).toContain("header keys: Authorization");
     });
 
     it("handles empty server list", async () => {

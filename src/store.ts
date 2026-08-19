@@ -253,12 +253,14 @@ export class Store {
   }
 
   getToolDetails(refs: ToolRef[]): ToolDetail[] {
+    // Match on the (server_name, tool_name) pair — the concatenated id is
+    // ambiguous when either name itself contains the "__" separator
     const stmt = this.db.prepare(
-      "SELECT server_name, tool_name, description, input_schema FROM tools WHERE id = ?"
+      "SELECT server_name, tool_name, description, input_schema FROM tools WHERE server_name = ? AND tool_name = ?"
     );
     const details: ToolDetail[] = [];
     for (const ref of refs) {
-      const row = stmt.get(prefixToolName(ref.server_name, ref.tool_name)) as
+      const row = stmt.get(ref.server_name, ref.tool_name) as
         | { server_name: string; tool_name: string; description: string; input_schema: string }
         | undefined;
       if (row) {

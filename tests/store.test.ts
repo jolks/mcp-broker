@@ -318,6 +318,18 @@ describe("Store", () => {
     it("returns empty array for empty refs", () => {
       expect(store.getToolDetails([])).toEqual([]);
     });
+
+    it("does not match another server's tool when names contain the __ separator", () => {
+      store.upsertServer(makeServer({ name: "foo" }));
+      store.upsertTools("foo", [
+        { tool_name: "bar__baz", description: "Ambiguous name", input_schema: "{}" },
+      ]);
+
+      // "foo__bar"/"baz" concatenates to the same id as "foo"/"bar__baz" —
+      // it must not resolve to foo's tool
+      expect(store.getToolDetails([{ server_name: "foo__bar", tool_name: "baz" }])).toEqual([]);
+      expect(store.getToolDetails([{ server_name: "foo", tool_name: "bar__baz" }])).toHaveLength(1);
+    });
   });
 
   // ── Cascade deletes ──────────────────────────────────

@@ -167,7 +167,9 @@ export const META_TOOLS: Tool[] = [
         env: {
           type: "object",
           additionalProperties: { type: "string" },
-          description: "New environment variables (replaces all existing env vars)",
+          description:
+            "New environment variables. Replaces ALL existing env vars — check current key names " +
+            "via list_mcp_servers and include every var you want to keep.",
         },
         url: { type: "string", description: "New URL for SSE/Streamable HTTP server" },
         headers: {
@@ -201,8 +203,11 @@ const META_TOOL_NAMES = new Set(META_TOOLS.map((t) => t.name));
 export function truncateDescription(desc: string): string {
   const firstLine = desc.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
   if (!firstLine) return "(no description)";
-  if (firstLine.length <= LIST_TOOLS_DESCRIPTION_MAX_CHARS) return firstLine;
-  return firstLine.slice(0, LIST_TOOLS_DESCRIPTION_MAX_CHARS - 1).trimEnd() + "…";
+  // Slice by code point — a plain .slice() can split an astral char (e.g. emoji)
+  // straddling the cap, leaving a lone surrogate in the output
+  const chars = Array.from(firstLine);
+  if (chars.length <= LIST_TOOLS_DESCRIPTION_MAX_CHARS) return firstLine;
+  return chars.slice(0, LIST_TOOLS_DESCRIPTION_MAX_CHARS - 1).join("").trimEnd() + "…";
 }
 
 // ── Dynamic description builder ──────────────────────────
@@ -327,6 +332,16 @@ export async function handleMetaTool(
         );
       }
       if (tools.length === 0) {
+        if (filter) {
+          const emptyKnown = filter.filter((n) => !unknownServers.includes(n));
+          const unknownNote = unknownServers.length > 0
+            ? ` Unknown server(s): ${unknownServers.join(", ")}.`
+            : "";
+          return textResult(
+            `No tools indexed for server(s): ${emptyKnown.join(", ")}.${unknownNote} ` +
+            "Call list_tools without server_names to browse all tools, or list_mcp_servers to check registered servers."
+          );
+        }
         return textResult(
           "No tools indexed. Use list_mcp_servers to check registered servers, or add_mcp_server to add one."
         );
@@ -430,9 +445,16 @@ export async function handleMetaTool(
       if (servers.length === 0) {
         return textResult("No servers registered. Use add_mcp_server or run `mcp-broker import <config-path>` to add servers.");
       }
-      const lines = servers.map(
-        (s) => `- **${s.name}**: ${s.toolCount} tools | ${s.connected ? "connected" : "disconnected"} | ${s.source}`
-      );
+      const lines = servers.map((s) => {
+        // Key names only — values are never exposed. Shown so update_mcp_server
+        // callers know which env vars/headers exist and must be preserved.
+        const keys = s.envKeys.length > 0
+          ? ` | env keys: ${s.envKeys.join(", ")}`
+          : s.headerKeys.length > 0
+            ? ` | header keys: ${s.headerKeys.join(", ")}`
+            : "";
+        return `- **${s.name}**: ${s.toolCount} tools | ${s.connected ? "connected" : "disconnected"} | ${s.source}${keys}`;
+      });
       return textResult(
         lines.join("\n") +
         "\n\nUse list_tools (optionally with server_names) to browse tools, then describe_tools → call_tools."

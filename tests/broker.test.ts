@@ -84,6 +84,17 @@ describe("Broker", () => {
       const result = broker.describeTools([{ server_name: "srv", tool_name: "t1" }]);
       expect(result.missing).toEqual([]);
     });
+
+    it("does not treat a __-colliding ref as found", () => {
+      // "foo"/"bar__baz" and "foo__bar"/"baz" concatenate to the same id —
+      // matching must compare the (server, tool) pair, not the joined string
+      vi.mocked(store.getToolDetails).mockReturnValue([
+        { server_name: "foo", tool_name: "bar__baz", description: "", input_schema: {} },
+      ]);
+
+      const result = broker.describeTools([{ server_name: "foo__bar", tool_name: "baz" }]);
+      expect(result.missing).toEqual([{ server_name: "foo__bar", tool_name: "baz" }]);
+    });
   });
 
   // ── callTools ───────────────────────────────────────
@@ -325,18 +336,42 @@ describe("Broker", () => {
 
       const result = broker.listServers();
       expect(result).toEqual([
-        { name: "a", connected: true, toolCount: 2, source: "npx -y @mcp/a" },
-        { name: "b", connected: false, toolCount: 0, source: "https://mcp.example.com/sse" },
+        { name: "a", connected: true, toolCount: 2, source: "npx -y @mcp/a", envKeys: [], headerKeys: [] },
+        { name: "b", connected: false, toolCount: 0, source: "https://mcp.example.com/sse", envKeys: [], headerKeys: [] },
       ]);
     });
 
-    it("never exposes env values in source", () => {
+    it("never exposes env values, only key names", () => {
       vi.mocked(store.listServers).mockReturnValue([
         makeServer({ name: "a", command: "node", args: ["srv.js"], env: { TOKEN: "sekret" } }),
       ]);
 
       const result = broker.listServers();
+      expect(result[0].envKeys).toEqual(["TOKEN"]);
       expect(JSON.stringify(result)).not.toContain("sekret");
+    });
+
+    it("never exposes header values, only key names", () => {
+      vi.mocked(store.listServers).mockReturnValue([
+        makeUrlServer({ name: "b", headers: { Authorization: "Bearer xyz123" } }),
+      ]);
+
+      const result = broker.listServers();
+      expect(result[0].headerKeys).toEqual(["Authorization"]);
+      expect(JSON.stringify(result)).not.toContain("xyz123");
+    });
+
+    it("redacts secret-looking args in source", () => {
+      vi.mocked(store.listServers).mockReturnValue([
+        makeServer({
+          name: "a",
+          command: "npx",
+          args: ["some-server", "--api-key", "sk-live-abc123", "--token=tok456", "--verbose"],
+        }),
+      ]);
+
+      const result = broker.listServers();
+      expect(result[0].source).toBe("npx some-server --api-key *** --token=*** --verbose");
     });
 
     it("returns empty array when no servers", () => {

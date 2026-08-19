@@ -39,24 +39,20 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { resolve, join } from "node:path";
-import { writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { copyEnv, buildBroker, writeEchoConfig, seedBroker } from "./e2e-helpers.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const shouldRun = process.env.RUN_E2E === "1";
 
-const ECHO_CONFIG_PATH = resolve(ROOT, "tests/fixtures/echo-config.json");
-
-// Use a temp directory so we don't touch ~/.mcp-broker
+// Use a temp directory so we don't touch ~/.mcp-broker. The generated echo
+// config lives here too, so parallel suites never share files.
 const TEST_DIR = mkdtempSync(join(tmpdir(), "mcp-broker-e2e-gemini-"));
+const ECHO_CONFIG_PATH = join(TEST_DIR, "echo-config.json");
 
 // Build env: set MCP_BROKER_HOME for isolation
-const testEnv: Record<string, string> = {};
-for (const [k, v] of Object.entries(process.env)) {
-  if (v !== undefined) {
-    testEnv[k] = v;
-  }
-}
+const testEnv = copyEnv();
 testEnv.MCP_BROKER_HOME = TEST_DIR;
 // gemini CLI >= ~0.50 refuses to run headless from untrusted directories
 // (exit 55); tests run from temp dirs, so trust the workspace explicitly.
@@ -71,7 +67,6 @@ interface GeminiResult {
   cached_tokens: number;
   uncached_input_tokens: number;
   tool_calls: string[];
-  tool_calls_per_turn: string[][];
 }
 
 /**
@@ -118,10 +113,6 @@ function gemini(
   // Broker tools are prefixed with mcp_broker_
   const allToolCalls: string[] = [];
   const toolCalls: string[] = [];
-  const toolCallsPerTurn: string[][] = [];
-  // Gemini emits flat tool_use events, group consecutive ones as a "turn"
-  let currentTurnTools: string[] = [];
-  let lastEventWasToolUse = false;
 
   for (const event of events) {
     if (event.type === "tool_use") {
@@ -131,25 +122,13 @@ function gemini(
       console.error(`[e2e-gemini]   tool_use: ${toolName}(${paramsSummary})`);
       if (toolName.startsWith("mcp_broker_")) {
         toolCalls.push(toolName);
-        currentTurnTools.push(toolName);
       }
-      lastEventWasToolUse = true;
-    } else {
-      if (lastEventWasToolUse && currentTurnTools.length > 0) {
-        toolCallsPerTurn.push(currentTurnTools);
-        currentTurnTools = [];
-      }
-      lastEventWasToolUse = false;
     }
 
     if (event.type === "message" && event.role === "assistant" && event.content) {
       const textPreview = String(event.content).slice(0, 120).replace(/\n/g, " ");
       console.error(`[e2e-gemini]   assistant: ${textPreview}`);
     }
-  }
-  // Flush any remaining turn tools
-  if (currentTurnTools.length > 0) {
-    toolCallsPerTurn.push(currentTurnTools);
   }
 
   // The last event should be the result
@@ -191,7 +170,6 @@ function gemini(
     cached_tokens: cached,
     uncached_input_tokens: uncachedInput,
     tool_calls: toolCalls,
-    tool_calls_per_turn: toolCallsPerTurn,
   };
 }
 
@@ -211,7 +189,7 @@ describe.skipIf(!shouldRun)("E2E: Gemini CLI", { timeout: 300_000 }, () => {
 
   beforeAll(() => {
     // 1. Build
-    execFileSync("pnpm", ["run", "build"], { cwd: ROOT, timeout: 60_000, stdio: "pipe" });
+    buildBroker(ROOT);
 
     // 2. Create working directory
     mkdirSync(testCwd, { recursive: true });
@@ -225,27 +203,11 @@ describe.skipIf(!shouldRun)("E2E: Gemini CLI", { timeout: 300_000 }, () => {
       },
     });
 
-    // 4. Generate echo-config.json with absolute path
-    const echoServerPath = resolve(ROOT, "tests/fixtures/echo-server.ts");
-    const config = {
-      mcpServers: {
-        echo: {
-          command: "npx",
-          args: ["tsx", echoServerPath],
-        },
-      },
-    };
-    writeFileSync(ECHO_CONFIG_PATH, JSON.stringify(config, null, 2));
-
-    // 5. Seed the broker with echo server
-    execFileSync(
-      "node",
-      ["dist/index.js", "setup", ECHO_CONFIG_PATH, "--no-rewrite"],
-      { cwd: ROOT, timeout: 60_000, stdio: "pipe", env: testEnv },
-    );
+    // 4. Generate echo config with absolute path, seed the broker with it
+    writeEchoConfig(ROOT, ECHO_CONFIG_PATH);
+    seedBroker(ROOT, ECHO_CONFIG_PATH, testEnv);
 
     return () => {
-      try { unlinkSync(ECHO_CONFIG_PATH); } catch { /* ignore */ }
       try { rmSync(TEST_DIR, { recursive: true }); } catch { /* ignore */ }
     };
   }, 120_000);
@@ -335,11 +297,7 @@ describe.skipIf(!shouldRun)("E2E: Gemini CLI", { timeout: 300_000 }, () => {
       writeFileSync(vibiumConfig, JSON.stringify({
         mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
       }));
-      execFileSync(
-        "node",
-        ["dist/index.js", "setup", vibiumConfig, "--no-rewrite"],
-        { cwd: ROOT, timeout: 120_000, stdio: "pipe", env: brokerEnv },
-      );
+      seedBroker(ROOT, vibiumConfig, brokerEnv, 120_000);
       writeGeminiMcpConfig(brokerCwd, {
         broker: {
           command: "node",

@@ -1,5 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Store, type ServerRecord, type ToolListing, type ToolRef, type ToolDetail, isUrlServer, prefixToolName } from "./store.js";
+import { Store, type ServerRecord, type ToolListing, type ToolRef, type ToolDetail, isUrlServer } from "./store.js";
 import { Pool } from "./pool.js";
 import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
@@ -30,6 +30,34 @@ export interface ServerSummary {
   connected: boolean;
   toolCount: number;
   source: string; // launch command for stdio servers, URL for URL servers
+  envKeys: string[]; // env var names for stdio servers — values never exposed
+  headerKeys: string[]; // header names for URL servers — values never exposed
+}
+
+// Args like ["--api-key", "sk-…"] would otherwise leak secrets into every
+// list_mcp_servers response (a common pattern for servers that take tokens as flags).
+const SENSITIVE_FLAG = /key|token|secret|password|passwd|auth|credential/i;
+
+export function redactSensitiveArgs(args: string[]): string[] {
+  const redacted: string[] = [];
+  let maskNext = false;
+  for (const arg of args) {
+    if (maskNext) {
+      redacted.push("***");
+      maskNext = false;
+    } else if (arg.startsWith("-") && SENSITIVE_FLAG.test(arg)) {
+      const eq = arg.indexOf("=");
+      if (eq === -1) {
+        redacted.push(arg);
+        maskNext = true;
+      } else {
+        redacted.push(arg.slice(0, eq + 1) + "***");
+      }
+    } else {
+      redacted.push(arg);
+    }
+  }
+  return redacted;
 }
 
 export class Broker {
@@ -54,8 +82,11 @@ export class Broker {
 
   describeTools(refs: ToolRef[]): { found: ToolDetail[]; missing: ToolRef[] } {
     const found = this.store.getToolDetails(refs);
-    const foundIds = new Set(found.map((t) => prefixToolName(t.server_name, t.tool_name)));
-    const missing = refs.filter((r) => !foundIds.has(prefixToolName(r.server_name, r.tool_name)));
+    // Key by (server, tool) pair — concatenated "server__tool" ids are ambiguous
+    // when either name itself contains the separator
+    const key = (r: ToolRef) => JSON.stringify([r.server_name, r.tool_name]);
+    const foundKeys = new Set(found.map(key));
+    const missing = refs.filter((r) => !foundKeys.has(key(r)));
     return { found, missing };
   }
 
@@ -180,8 +211,12 @@ export class Broker {
       name: s.name,
       connected: this.pool.isConnected(s.name),
       toolCount: this.store.getToolCount(s.name),
-      // Env and header values are deliberately excluded (may contain API keys)
-      source: isUrlServer(s) ? s.url : [s.command, ...s.args].join(" "),
+      // Env/header values and secret-looking args are deliberately excluded or
+      // redacted (may contain API keys); key names are exposed so
+      // update_mcp_server callers know which vars exist and must be preserved
+      source: isUrlServer(s) ? s.url : [s.command, ...redactSensitiveArgs(s.args)].join(" "),
+      envKeys: isUrlServer(s) ? [] : Object.keys(s.env ?? {}),
+      headerKeys: isUrlServer(s) ? Object.keys(s.headers ?? {}) : [],
     }));
   }
 
