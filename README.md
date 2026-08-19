@@ -87,7 +87,7 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 | `call_tools` | Invoke one or more discovered tools. Multiple invocations execute in parallel; `sequential: true` for ordered steps. |
 | `add_mcp_server` | Register a new MCP server. Harvests its tools into the listing. |
 | `remove_mcp_server` | Remove a server and its indexed tools. |
-| `list_mcp_servers` | List all servers with connection status, tool count, and launch command or URL. |
+| `list_mcp_servers` | List all servers with connection status, tool count, launch command or URL (secret-looking args redacted), and env/header key names (values never exposed). |
 | `update_mcp_server` | Update a server's config (command, args, env, url, headers). Re-harvests and reconnects. |
 
 ## Architecture

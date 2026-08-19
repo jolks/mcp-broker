@@ -44,7 +44,7 @@ LLM → call_tools(invocations: [{server_name: "vibium", tool_name: "browser_nav
 
 - **index.ts** — CLI entry point (commander). Creates Store/Pool/Registry/Broker, wires them together.
 - **server.ts** — Low-level MCP `Server` (not `McpServer`). Defines 7 meta-tools with annotations. `list_tools` description is dynamically built with actual server names and tool counts via `buildDynamicTools()`. Response text guides the LLM through the discovery loop: list → describe → call. `truncateDescription()` caps listing lines at `LIST_TOOLS_DESCRIPTION_MAX_CHARS`.
-- **broker.ts** — Orchestration layer. Owns discovery (`listTools`, `describeTools`), tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup.
+- **broker.ts** — Orchestration layer. Owns discovery (`listTools`, `describeTools`), tool calling, server add/remove/refresh. Connects store, pool, registry, and harvester. Syncs registry → SQLite on startup. `listServers()` redacts secret-looking CLI args in `source` and exposes env/header key names only (never values).
 - **store.ts** — SQLite via better-sqlite3. Tables: `servers`, `tools`. DB at `$MCP_BROKER_HOME/broker.db`. Plain rebuildable index of harvested tool schemas; a legacy `tools_fts` table is dropped on open.
 - **transport.ts** — Transport creation and URL connection logic. Exports `createStdioTransport()`, `createStreamableTransport()`, `createSseTransport()`, and `connectUrl()` which handles Streamable HTTP → SSE fallback (per MCP spec). Used by both pool and harvester.
 - **pool.ts** — Eager connection manager. Connects to all servers on startup (stdio via `createStdioTransport`, URL via `connectUrl`). Auto-reconnects on disconnect. `Map<serverName, {client, transport}>`.
@@ -75,10 +75,13 @@ All imports require `.js` extension even in TypeScript:
 - **DB permissions** — `broker.db` is chmod 0600 because it may contain env vars with API keys.
 - **Registry permissions** — `servers.json` is chmod 0600 because it may contain env vars with API keys.
 - **Backup before rewrite** — the `setup` command always verifies backup size > 0 before overwriting the original config.
-- **Tool ID prefixing** — tools are stored with `server__tool` IDs via `prefixToolName()` in `store.ts`.
+- **Tool ID prefixing** — tools are stored with `server__tool` IDs via `prefixToolName()` in `store.ts`. Lookups (`getToolDetails`, `describeTools` missing-detection) match on the `(server_name, tool_name)` pair, never the concatenated id — names containing `__` make the id ambiguous.
+- **Secrets never surface via meta-tools** — `list_mcp_servers` redacts secret-looking CLI args (e.g. `--api-key …`) in `source` and shows env/header key names only, never values.
 - **DB CHECK constraints** — `servers` table enforces that exactly one of `command` or `url` is non-null via CHECK constraints. Applied to new DBs and DBs going through `migrateUrlColumns()`.
 
 ### Running E2E tests
+
+Shared e2e setup (env copy, build, echo config generation, broker seeding) lives in `tests/e2e-helpers.ts`; generated fixtures go in each suite's own temp dir so parallel runs never share files.
 
 E2E tests spawn `claude -p` as a subprocess, so they require:
 - The `claude` CLI installed and authenticated
