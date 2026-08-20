@@ -203,6 +203,8 @@ const META_TOOL_NAMES = new Set(META_TOOLS.map((t) => t.name));
 export function truncateDescription(desc: string): string {
   const firstLine = desc.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
   if (!firstLine) return "(no description)";
+  // UTF-16 length >= code-point count, so anything under the cap here fits
+  if (firstLine.length <= LIST_TOOLS_DESCRIPTION_MAX_CHARS) return firstLine;
   // Slice by code point — a plain .slice() can split an astral char (e.g. emoji)
   // straddling the cap, leaving a lone surrogate in the output
   const chars = Array.from(firstLine);
@@ -322,23 +324,21 @@ export async function handleMetaTool(
         }
       }
 
-      // Empty array is treated as "no filter" — most forgiving for LLM callers
-      const filter = serverNames && serverNames.length > 0 ? serverNames : undefined;
-      const { tools, unknownServers } = broker.listTools(filter);
+      // matchedServers is present only when a non-empty filter was given
+      const { tools, unknownServers, matchedServers } = broker.listTools(serverNames);
 
-      if (filter && unknownServers.length === filter.length) {
+      if (matchedServers && matchedServers.length === 0) {
         return errorResult(
           `Unknown server(s): ${unknownServers.join(", ")}. Call list_mcp_servers to see registered servers.`
         );
       }
       if (tools.length === 0) {
-        if (filter) {
-          const emptyKnown = filter.filter((n) => !unknownServers.includes(n));
+        if (matchedServers) {
           const unknownNote = unknownServers.length > 0
             ? ` Unknown server(s): ${unknownServers.join(", ")}.`
             : "";
           return textResult(
-            `No tools indexed for server(s): ${emptyKnown.join(", ")}.${unknownNote} ` +
+            `No tools indexed for server(s): ${matchedServers.join(", ")}.${unknownNote} ` +
             "Call list_tools without server_names to browse all tools, or list_mcp_servers to check registered servers."
           );
         }

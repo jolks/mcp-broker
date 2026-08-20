@@ -30,19 +30,25 @@ describe("Broker", () => {
   // ── listTools ───────────────────────────────────────
 
   describe("listTools", () => {
-    it("delegates to store.listAllTools", () => {
+    it("delegates to store.listAllTools without touching server records when unfiltered", () => {
       const mockTools: ToolListing[] = [
         { server_name: "srv", tool_name: "tool", description: "A tool" },
       ];
       vi.mocked(store.listAllTools).mockReturnValue(mockTools);
-      vi.mocked(store.listServers).mockReturnValue([makeServer({ name: "srv" })]);
 
       const result = broker.listTools();
-      expect(store.listAllTools).toHaveBeenCalledWith(undefined);
       expect(result).toEqual({ tools: mockTools, unknownServers: [] });
+      expect(store.listServers).not.toHaveBeenCalled();
     });
 
-    it("passes server filter through and flags unknown servers", () => {
+    it("treats an empty filter as no filter", () => {
+      vi.mocked(store.listAllTools).mockReturnValue([]);
+      const result = broker.listTools([]);
+      expect(result.matchedServers).toBeUndefined();
+      expect(store.listServers).not.toHaveBeenCalled();
+    });
+
+    it("passes server filter through and splits matched/unknown servers", () => {
       vi.mocked(store.listAllTools).mockReturnValue([
         { server_name: "github", tool_name: "t1", description: "T1" },
       ]);
@@ -50,6 +56,7 @@ describe("Broker", () => {
 
       const result = broker.listTools(["github", "nope"]);
       expect(store.listAllTools).toHaveBeenCalledWith(["github", "nope"]);
+      expect(result.matchedServers).toEqual(["github"]);
       expect(result.unknownServers).toEqual(["nope"]);
       expect(result.tools).toHaveLength(1);
     });
@@ -58,42 +65,22 @@ describe("Broker", () => {
   // ── describeTools ───────────────────────────────────
 
   describe("describeTools", () => {
-    it("splits found and missing refs", () => {
-      const found: ToolDetail[] = [
-        { server_name: "srv", tool_name: "real", description: "Real", input_schema: { type: "object" } },
+    it("delegates to store.getToolDetails", () => {
+      const details: { found: ToolDetail[]; missing: { server_name: string; tool_name: string }[] } = {
+        found: [
+          { server_name: "srv", tool_name: "real", description: "Real", input_schema: { type: "object" } },
+        ],
+        missing: [{ server_name: "srv", tool_name: "fake" }],
+      };
+      vi.mocked(store.getToolDetails).mockReturnValue(details);
+
+      const refs = [
+        { server_name: "srv", tool_name: "real" },
+        { server_name: "srv", tool_name: "fake" },
       ];
-      vi.mocked(store.getToolDetails).mockReturnValue(found);
-
-      const result = broker.describeTools([
-        { server_name: "srv", tool_name: "real" },
-        { server_name: "srv", tool_name: "fake" },
-      ]);
-      expect(store.getToolDetails).toHaveBeenCalledWith([
-        { server_name: "srv", tool_name: "real" },
-        { server_name: "srv", tool_name: "fake" },
-      ]);
-      expect(result.found).toEqual(found);
-      expect(result.missing).toEqual([{ server_name: "srv", tool_name: "fake" }]);
-    });
-
-    it("returns empty missing when all found", () => {
-      vi.mocked(store.getToolDetails).mockReturnValue([
-        { server_name: "srv", tool_name: "t1", description: "", input_schema: {} },
-      ]);
-
-      const result = broker.describeTools([{ server_name: "srv", tool_name: "t1" }]);
-      expect(result.missing).toEqual([]);
-    });
-
-    it("does not treat a __-colliding ref as found", () => {
-      // "foo"/"bar__baz" and "foo__bar"/"baz" concatenate to the same id —
-      // matching must compare the (server, tool) pair, not the joined string
-      vi.mocked(store.getToolDetails).mockReturnValue([
-        { server_name: "foo", tool_name: "bar__baz", description: "", input_schema: {} },
-      ]);
-
-      const result = broker.describeTools([{ server_name: "foo__bar", tool_name: "baz" }]);
-      expect(result.missing).toEqual([{ server_name: "foo__bar", tool_name: "baz" }]);
+      const result = broker.describeTools(refs);
+      expect(store.getToolDetails).toHaveBeenCalledWith(refs);
+      expect(result).toBe(details);
     });
   });
 
@@ -372,6 +359,19 @@ describe("Broker", () => {
 
       const result = broker.listServers();
       expect(result[0].source).toBe("npx some-server --api-key *** --token=*** --verbose");
+    });
+
+    it("redacts KEY=value args without a leading dash (env-wrapper launches)", () => {
+      vi.mocked(store.listServers).mockReturnValue([
+        makeServer({
+          name: "a",
+          command: "env",
+          args: ["MY_API_KEY=sk-live-xyz", "LOG_LEVEL=debug", "npx", "server-x"],
+        }),
+      ]);
+
+      const result = broker.listServers();
+      expect(result[0].source).toBe("env MY_API_KEY=*** LOG_LEVEL=debug npx server-x");
     });
 
     it("returns empty array when no servers", () => {

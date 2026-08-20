@@ -75,7 +75,7 @@ All imports require `.js` extension even in TypeScript:
 - **DB permissions** — `broker.db` is chmod 0600 because it may contain env vars with API keys.
 - **Registry permissions** — `servers.json` is chmod 0600 because it may contain env vars with API keys.
 - **Backup before rewrite** — the `setup` command always verifies backup size > 0 before overwriting the original config.
-- **Tool ID prefixing** — tools are stored with `server__tool` IDs via `prefixToolName()` in `store.ts`. Lookups (`getToolDetails`, `describeTools` missing-detection) match on the `(server_name, tool_name)` pair, never the concatenated id — names containing `__` make the id ambiguous.
+- **Tool identity is the `(server_name, tool_name)` pair** — the `tools` table's composite PRIMARY KEY. The legacy concatenated `server__tool` id column was ambiguous when a name contains `__`; DBs that still have it are migrated on open (`migrateToolsPrimaryKey()`).
 - **Secrets never surface via meta-tools** — `list_mcp_servers` redacts secret-looking CLI args (e.g. `--api-key …`) in `source` and shows env/header key names only, never values.
 - **DB CHECK constraints** — `servers` table enforces that exactly one of `command` or `url` is non-null via CHECK constraints. Applied to new DBs and DBs going through `migrateUrlColumns()`.
 

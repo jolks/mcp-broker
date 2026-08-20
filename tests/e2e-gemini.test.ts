@@ -39,9 +39,12 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { resolve, join } from "node:path";
-import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { copyEnv, buildBroker, writeEchoConfig, seedBroker } from "./e2e-helpers.js";
+import {
+  copyEnv, buildBroker, seedBroker,
+  brokerEntry, echoEntry, vibiumEntry, writeMcpConfig,
+} from "./e2e-helpers.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const shouldRun = process.env.RUN_E2E === "1";
@@ -176,10 +179,10 @@ function gemini(
 /**
  * Write Gemini project-scoped MCP config into `<dir>/.gemini/settings.json`.
  */
-function writeGeminiMcpConfig(dir: string, mcpServers: Record<string, unknown>): void {
+function writeGeminiMcpConfig(dir: string, mcpServers: Record<string, object>): void {
   const geminiDir = join(dir, ".gemini");
   mkdirSync(geminiDir, { recursive: true });
-  writeFileSync(join(geminiDir, "settings.json"), JSON.stringify({ mcpServers }, null, 2));
+  writeMcpConfig(join(geminiDir, "settings.json"), mcpServers);
 }
 
 describe.skipIf(!shouldRun)("E2E: Gemini CLI", { timeout: 300_000 }, () => {
@@ -195,16 +198,10 @@ describe.skipIf(!shouldRun)("E2E: Gemini CLI", { timeout: 300_000 }, () => {
     mkdirSync(testCwd, { recursive: true });
 
     // 3. Write Gemini MCP config pointing to the broker
-    writeGeminiMcpConfig(testCwd, {
-      broker: {
-        command: "node",
-        args: [resolve(ROOT, "dist/index.js"), "serve"],
-        env: { MCP_BROKER_HOME: TEST_DIR },
-      },
-    });
+    writeGeminiMcpConfig(testCwd, { broker: brokerEntry(ROOT, TEST_DIR) });
 
-    // 4. Generate echo config with absolute path, seed the broker with it
-    writeEchoConfig(ROOT, ECHO_CONFIG_PATH);
+    // 4. Generate echo config, seed the broker with it
+    writeMcpConfig(ECHO_CONFIG_PATH, { echo: echoEntry(ROOT) });
     seedBroker(ROOT, ECHO_CONFIG_PATH, testEnv);
 
     return () => {
@@ -280,9 +277,7 @@ describe.skipIf(!shouldRun)("E2E: Gemini CLI", { timeout: 300_000 }, () => {
       const directDir = mkdtempSync(join(tmpdir(), "mcp-broker-e2e-gemini-direct-"));
       const directCwd = join(directDir, "workdir");
       mkdirSync(directCwd, { recursive: true });
-      writeGeminiMcpConfig(directCwd, {
-        vibium: { command: "npx", args: ["-y", "vibium", "mcp"] },
-      });
+      writeGeminiMcpConfig(directCwd, { vibium: vibiumEntry() });
       const directEnv = { ...testEnv, MCP_BROKER_HOME: directDir };
       const directResult = gemini(prompt, directCwd, directEnv);
       expect(directResult.result).toContain("Example Domain");
@@ -294,17 +289,9 @@ describe.skipIf(!shouldRun)("E2E: Gemini CLI", { timeout: 300_000 }, () => {
       const brokerEnv = { ...testEnv, MCP_BROKER_HOME: brokerDir };
       // Seed vibium into this broker instance
       const vibiumConfig = join(brokerDir, "vibium-config.json");
-      writeFileSync(vibiumConfig, JSON.stringify({
-        mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
-      }));
+      writeMcpConfig(vibiumConfig, { vibium: vibiumEntry() });
       seedBroker(ROOT, vibiumConfig, brokerEnv, 120_000);
-      writeGeminiMcpConfig(brokerCwd, {
-        broker: {
-          command: "node",
-          args: [resolve(ROOT, "dist/index.js"), "serve"],
-          env: { MCP_BROKER_HOME: brokerDir },
-        },
-      });
+      writeGeminiMcpConfig(brokerCwd, { broker: brokerEntry(ROOT, brokerDir) });
       const brokerResult = gemini(prompt, brokerCwd, brokerEnv);
       expect(brokerResult.tool_calls).toContain("mcp_broker_list_tools");
       expect(brokerResult.tool_calls).toContain("mcp_broker_call_tools");

@@ -221,9 +221,9 @@ describe("Store", () => {
       store.upsertTools("srv", [
         { tool_name: "big", description: "Big schema", input_schema: largeSchema },
       ]);
-      const details = store.getToolDetails([{ server_name: "srv", tool_name: "big" }]);
-      expect(details.length).toBe(1);
-      expect(details[0].input_schema).toEqual(JSON.parse(largeSchema));
+      const { found } = store.getToolDetails([{ server_name: "srv", tool_name: "big" }]);
+      expect(found.length).toBe(1);
+      expect(found[0].input_schema).toEqual(JSON.parse(largeSchema));
     });
   });
 
@@ -287,8 +287,8 @@ describe("Store", () => {
     });
 
     it("returns parsed input_schema", () => {
-      const details = store.getToolDetails([{ server_name: "srv", tool_name: "alpha" }]);
-      expect(details).toEqual([
+      const { found } = store.getToolDetails([{ server_name: "srv", tool_name: "alpha" }]);
+      expect(found).toEqual([
         {
           server_name: "srv",
           tool_name: "alpha",
@@ -299,36 +299,54 @@ describe("Store", () => {
     });
 
     it("preserves request order", () => {
-      const details = store.getToolDetails([
+      const { found } = store.getToolDetails([
         { server_name: "srv", tool_name: "beta" },
         { server_name: "srv", tool_name: "alpha" },
       ]);
-      expect(details.map((d) => d.tool_name)).toEqual(["beta", "alpha"]);
+      expect(found.map((d) => d.tool_name)).toEqual(["beta", "alpha"]);
     });
 
-    it("silently omits missing refs", () => {
-      const details = store.getToolDetails([
+    it("reports missing refs", () => {
+      const { found, missing } = store.getToolDetails([
         { server_name: "srv", tool_name: "alpha" },
         { server_name: "srv", tool_name: "nonexistent" },
         { server_name: "other", tool_name: "alpha" },
       ]);
-      expect(details.map((d) => d.tool_name)).toEqual(["alpha"]);
+      expect(found.map((d) => d.tool_name)).toEqual(["alpha"]);
+      expect(missing).toEqual([
+        { server_name: "srv", tool_name: "nonexistent" },
+        { server_name: "other", tool_name: "alpha" },
+      ]);
     });
 
-    it("returns empty array for empty refs", () => {
-      expect(store.getToolDetails([])).toEqual([]);
+    it("returns empty results for empty refs", () => {
+      expect(store.getToolDetails([])).toEqual({ found: [], missing: [] });
     });
 
-    it("does not match another server's tool when names contain the __ separator", () => {
+    it("does not match another server's tool when names contain __", () => {
       store.upsertServer(makeServer({ name: "foo" }));
       store.upsertTools("foo", [
         { tool_name: "bar__baz", description: "Ambiguous name", input_schema: "{}" },
       ]);
 
-      // "foo__bar"/"baz" concatenates to the same id as "foo"/"bar__baz" —
-      // it must not resolve to foo's tool
-      expect(store.getToolDetails([{ server_name: "foo__bar", tool_name: "baz" }])).toEqual([]);
-      expect(store.getToolDetails([{ server_name: "foo", tool_name: "bar__baz" }])).toHaveLength(1);
+      // "foo__bar"/"baz" and "foo"/"bar__baz" are distinct pairs — the
+      // legacy concatenated-id scheme conflated them
+      const miss = store.getToolDetails([{ server_name: "foo__bar", tool_name: "baz" }]);
+      expect(miss.found).toEqual([]);
+      expect(miss.missing).toHaveLength(1);
+      expect(store.getToolDetails([{ server_name: "foo", tool_name: "bar__baz" }]).found).toHaveLength(1);
+    });
+
+    it("stores concatenation-colliding pairs side by side", () => {
+      // Both pairs concatenate to "foo__bar__baz" — under the legacy id
+      // PRIMARY KEY the second insert would have violated UNIQUE
+      store.upsertServer(makeServer({ name: "foo" }));
+      store.upsertTools("foo", [{ tool_name: "bar__baz", description: "A", input_schema: "{}" }]);
+      store.upsertServer(makeServer({ name: "foo__bar" }));
+      store.upsertTools("foo__bar", [{ tool_name: "baz", description: "B", input_schema: "{}" }]);
+
+      expect(store.getToolDetails([{ server_name: "foo", tool_name: "bar__baz" }]).found[0].description).toBe("A");
+      expect(store.getToolDetails([{ server_name: "foo__bar", tool_name: "baz" }]).found[0].description).toBe("B");
     });
   });
 
@@ -455,6 +473,9 @@ describe("Store", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mcp-broker-fts-migration-test-"));
     });
 
+    // Historical schema (2026-07): post-URL-migration servers table, tools
+    // table still keyed by the concatenated id, FTS5 index still present.
+    // Opening it exercises both the id→composite-PK migration and the FTS drop.
     function createDbWithFts(dbPath: string): void {
       const db = new Database(dbPath);
       db.pragma("journal_mode = WAL");

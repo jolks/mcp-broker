@@ -30,7 +30,7 @@ export function makeStore(): Store {
     removeServer: vi.fn(),
     getToolCount: vi.fn(() => 0),
     listAllTools: vi.fn(() => []),
-    getToolDetails: vi.fn(() => []),
+    getToolDetails: vi.fn(() => ({ found: [], missing: [] })),
     getLastHarvestedAt: vi.fn(() => undefined),
     runInTransaction: vi.fn((fn: () => void) => fn()),
     close: vi.fn(),
@@ -45,7 +45,6 @@ export function makePool(): Pool {
     connectAll: vi.fn(),
     disconnectServer: vi.fn(),
     closeAll: vi.fn(),
-    getServerVersion: vi.fn(() => undefined),
   } as unknown as Pool;
 }
 

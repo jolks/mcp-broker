@@ -194,20 +194,21 @@ describe("handleMetaTool", () => {
       vi.mocked(broker.listTools).mockReturnValue({
         tools: [{ server_name: "github", tool_name: "t1", description: "T1" }],
         unknownServers: [],
+        matchedServers: ["github"],
       });
 
       await handleMetaTool(broker, "list_tools", { server_names: ["github"] });
       expect(broker.listTools).toHaveBeenCalledWith(["github"]);
     });
 
-    it("treats empty server_names array as no filter", async () => {
+    it("passes empty server_names through (broker treats it as no filter)", async () => {
       vi.mocked(broker.listTools).mockReturnValue({
         tools: [{ server_name: "srv", tool_name: "t1", description: "T1" }],
         unknownServers: [],
       });
 
       await handleMetaTool(broker, "list_tools", { server_names: [] });
-      expect(broker.listTools).toHaveBeenCalledWith(undefined);
+      expect(broker.listTools).toHaveBeenCalledWith([]);
     });
 
     it("returns error when server_names is not an array of strings", async () => {
@@ -217,7 +218,11 @@ describe("handleMetaTool", () => {
     });
 
     it("returns error when all requested servers are unknown", async () => {
-      vi.mocked(broker.listTools).mockReturnValue({ tools: [], unknownServers: ["nope", "missing"] });
+      vi.mocked(broker.listTools).mockReturnValue({
+        tools: [],
+        unknownServers: ["nope", "missing"],
+        matchedServers: [],
+      });
 
       const result = await handleMetaTool(broker, "list_tools", { server_names: ["nope", "missing"] });
       expect(result.isError).toBe(true);
@@ -230,6 +235,7 @@ describe("handleMetaTool", () => {
       vi.mocked(broker.listTools).mockReturnValue({
         tools: [{ server_name: "github", tool_name: "t1", description: "T1" }],
         unknownServers: ["nope"],
+        matchedServers: ["github"],
       });
 
       const result = await handleMetaTool(broker, "list_tools", { server_names: ["github", "nope"] });
@@ -250,7 +256,11 @@ describe("handleMetaTool", () => {
     });
 
     it("names the empty servers when a filter matches no tools", async () => {
-      vi.mocked(broker.listTools).mockReturnValue({ tools: [], unknownServers: ["typo"] });
+      vi.mocked(broker.listTools).mockReturnValue({
+        tools: [],
+        unknownServers: ["typo"],
+        matchedServers: ["newsrv"],
+      });
 
       const result = await handleMetaTool(broker, "list_tools", { server_names: ["newsrv", "typo"] });
       expect(result.isError).toBeUndefined();

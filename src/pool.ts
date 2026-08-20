@@ -80,12 +80,6 @@ export class Pool {
     return this.entries.has(serverName);
   }
 
-  getServerVersion(name: string): { name: string; version: string } | undefined {
-    const entry = this.entries.get(name);
-    if (!entry) return undefined;
-    return entry.client.getServerVersion();
-  }
-
   private clearReconnectState(name: string): void {
     this.reconnectPending.delete(name);
     this.reconnectAttempts.delete(name);

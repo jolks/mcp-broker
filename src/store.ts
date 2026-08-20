@@ -2,12 +2,7 @@ import Database from "better-sqlite3";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import { logger } from "./logger.js";
-import { dbPath as defaultDbPath, FILE_PERMISSION, TOOL_PREFIX_SEPARATOR } from "./config.js";
-
-/** Build prefixed tool name: "server__tool" */
-export function prefixToolName(serverName: string, toolName: string): string {
-  return `${serverName}${TOOL_PREFIX_SEPARATOR}${toolName}`;
-}
+import { dbPath as defaultDbPath, FILE_PERMISSION } from "./config.js";
 
 export interface StdioServerRecord {
   name: string;
@@ -29,7 +24,6 @@ export function isUrlServer(server: ServerRecord): server is UrlServerRecord {
 }
 
 export interface ToolRecord {
-  id: string;
   server_name: string;
   tool_name: string;
   description: string;
@@ -49,6 +43,21 @@ export interface ToolRef {
 
 export interface ToolDetail extends ToolListing {
   input_schema: object;
+}
+
+// Identity is the (server_name, tool_name) pair. A single concatenated
+// "server__tool" id (the legacy scheme) is ambiguous when either name
+// itself contains the separator.
+function toolsTableSql(tableName: string = "tools"): string {
+  return `CREATE TABLE IF NOT EXISTS ${tableName} (
+    server_name TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    input_schema TEXT NOT NULL DEFAULT '{}',
+    harvested_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (server_name, tool_name),
+    FOREIGN KEY (server_name) REFERENCES servers(name) ON DELETE CASCADE
+  )`;
 }
 
 function serversTableSql(tableName: string = "servers"): string {
@@ -89,23 +98,33 @@ export class Store {
   private migrate(): void {
     this.db.exec(`
       ${serversTableSql()};
-
-      CREATE TABLE IF NOT EXISTS tools (
-        id TEXT PRIMARY KEY,
-        server_name TEXT NOT NULL,
-        tool_name TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        input_schema TEXT NOT NULL DEFAULT '{}',
-        harvested_at TEXT DEFAULT (datetime('now')),
-        FOREIGN KEY (server_name) REFERENCES servers(name) ON DELETE CASCADE
-      );
+      ${toolsTableSql()};
     `);
 
     // Migrate existing DBs: add url/headers columns and relax command NOT NULL
     this.migrateUrlColumns();
 
+    // Migrate existing DBs: legacy concatenated-id tools table → composite PK
+    this.migrateToolsPrimaryKey();
+
     // Drop legacy FTS5 index (search was replaced by list_tools/describe_tools)
     this.db.exec("DROP TABLE IF EXISTS tools_fts;");
+  }
+
+  private migrateToolsPrimaryKey(): void {
+    const columns = this.db.pragma("table_info(tools)") as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "id")) return;
+
+    this.db.transaction(() => {
+      this.db.exec(toolsTableSql("tools_new") + ";");
+      this.db.exec(`
+        INSERT INTO tools_new (server_name, tool_name, description, input_schema, harvested_at)
+          SELECT server_name, tool_name, description, input_schema, harvested_at FROM tools;
+      `);
+      this.db.exec("DROP TABLE tools;");
+      this.db.exec("ALTER TABLE tools_new RENAME TO tools;");
+    })();
+    logger.info("Migrated tools table to composite (server_name, tool_name) primary key");
   }
 
   private migrateUrlColumns(): void {
@@ -212,13 +231,12 @@ export class Store {
       this.db.prepare("DELETE FROM tools WHERE server_name = ?").run(serverName);
 
       const insertTool = this.db.prepare(
-        `INSERT INTO tools (id, server_name, tool_name, description, input_schema, harvested_at)
-         VALUES (@id, @server_name, @tool_name, @description, @input_schema, datetime('now'))`
+        `INSERT INTO tools (server_name, tool_name, description, input_schema, harvested_at)
+         VALUES (@server_name, @tool_name, @description, @input_schema, datetime('now'))`
       );
 
       for (const tool of tools) {
         insertTool.run({
-          id: prefixToolName(serverName, tool.tool_name),
           server_name: serverName,
           tool_name: tool.tool_name,
           description: tool.description,
@@ -237,37 +255,32 @@ export class Store {
   }
 
   listAllTools(serverNames?: string[]): ToolListing[] {
-    if (serverNames && serverNames.length > 0) {
-      const placeholders = serverNames.map(() => "?").join(", ");
-      return this.db
-        .prepare(
-          `SELECT server_name, tool_name, description FROM tools
-           WHERE server_name IN (${placeholders})
-           ORDER BY server_name, tool_name`
-        )
-        .all(...serverNames) as ToolListing[];
-    }
+    const names = serverNames ?? [];
+    const where = names.length > 0
+      ? `WHERE server_name IN (${names.map(() => "?").join(", ")}) `
+      : "";
     return this.db
-      .prepare("SELECT server_name, tool_name, description FROM tools ORDER BY server_name, tool_name")
-      .all() as ToolListing[];
+      .prepare(`SELECT server_name, tool_name, description FROM tools ${where}ORDER BY server_name, tool_name`)
+      .all(...names) as ToolListing[];
   }
 
-  getToolDetails(refs: ToolRef[]): ToolDetail[] {
-    // Match on the (server_name, tool_name) pair — the concatenated id is
-    // ambiguous when either name itself contains the "__" separator
+  getToolDetails(refs: ToolRef[]): { found: ToolDetail[]; missing: ToolRef[] } {
     const stmt = this.db.prepare(
       "SELECT server_name, tool_name, description, input_schema FROM tools WHERE server_name = ? AND tool_name = ?"
     );
-    const details: ToolDetail[] = [];
+    const found: ToolDetail[] = [];
+    const missing: ToolRef[] = [];
     for (const ref of refs) {
       const row = stmt.get(ref.server_name, ref.tool_name) as
         | { server_name: string; tool_name: string; description: string; input_schema: string }
         | undefined;
       if (row) {
-        details.push({ ...row, input_schema: JSON.parse(row.input_schema) as object });
+        found.push({ ...row, input_schema: JSON.parse(row.input_schema) as object });
+      } else {
+        missing.push(ref);
       }
     }
-    return details;
+    return { found, missing };
   }
 
   getLastHarvestedAt(serverName: string): string | undefined {

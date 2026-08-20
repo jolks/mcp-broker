@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { resolve, join } from "node:path";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { copyEnv, buildBroker, writeEchoConfig, seedBroker } from "./e2e-helpers.js";
+import {
+  copyEnv, buildBroker, seedBroker,
+  brokerEntry, echoEntry, vibiumEntry, writeMcpConfig,
+} from "./e2e-helpers.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const shouldRun = process.env.RUN_E2E === "1";
@@ -124,20 +127,10 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
     buildBroker(ROOT);
 
     // 2. Write MCP config that passes MCP_BROKER_HOME env to the broker server
-    const mcpConfig = {
-      mcpServers: {
-        broker: {
-          command: "node",
-          args: [resolve(ROOT, "dist/index.js"), "serve"],
-          env: { MCP_BROKER_HOME: TEST_DIR },
-        },
-      },
-    };
-    writeFileSync(TEST_MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
+    writeMcpConfig(TEST_MCP_CONFIG, { broker: brokerEntry(ROOT, TEST_DIR) });
 
-    // 3. Generate echo config with absolute path, seed the broker with it
-    //    (uses MCP_BROKER_HOME via testEnv)
-    writeEchoConfig(ROOT, ECHO_CONFIG_PATH);
+    // 3. Generate echo config, seed the broker with it (uses MCP_BROKER_HOME via testEnv)
+    writeMcpConfig(ECHO_CONFIG_PATH, { echo: echoEntry(ROOT) });
     seedBroker(ROOT, ECHO_CONFIG_PATH, testEnv);
 
     return () => {
@@ -214,9 +207,7 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
       // === Direct run (fully isolated — no broker config anywhere) ===
       const directDir = mkdtempSync(join(tmpdir(), "mcp-broker-e2e-direct-"));
       const directMcpConfig = join(directDir, "mcp.json");
-      writeFileSync(directMcpConfig, JSON.stringify({
-        mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
-      }));
+      writeMcpConfig(directMcpConfig, { vibium: vibiumEntry() });
       const directEnv = { ...testEnv, MCP_BROKER_HOME: directDir };
       const directResult = claude(prompt, directMcpConfig, directEnv, directDir);
       expect(directResult.result).toContain("Example Domain");
@@ -226,20 +217,10 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
       const brokerEnv = { ...testEnv, MCP_BROKER_HOME: brokerDir };
       // Seed vibium into this broker instance
       const vibiumConfig = join(brokerDir, "vibium-config.json");
-      writeFileSync(vibiumConfig, JSON.stringify({
-        mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
-      }));
+      writeMcpConfig(vibiumConfig, { vibium: vibiumEntry() });
       seedBroker(ROOT, vibiumConfig, brokerEnv, 120_000);
       const brokerMcpConfig = join(brokerDir, "mcp.json");
-      writeFileSync(brokerMcpConfig, JSON.stringify({
-        mcpServers: {
-          broker: {
-            command: "node",
-            args: [resolve(ROOT, "dist/index.js"), "serve"],
-            env: { MCP_BROKER_HOME: brokerDir },
-          },
-        },
-      }));
+      writeMcpConfig(brokerMcpConfig, { broker: brokerEntry(ROOT, brokerDir) });
       const brokerResult = claude(prompt, brokerMcpConfig, brokerEnv);
       expect(brokerResult.tool_calls).toContain("mcp__broker__list_tools");
       expect(brokerResult.tool_calls).toContain("mcp__broker__call_tools");

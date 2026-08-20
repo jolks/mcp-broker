@@ -34,25 +34,25 @@ export interface ServerSummary {
   headerKeys: string[]; // header names for URL servers — values never exposed
 }
 
-// Args like ["--api-key", "sk-…"] would otherwise leak secrets into every
-// list_mcp_servers response (a common pattern for servers that take tokens as flags).
-const SENSITIVE_FLAG = /key|token|secret|password|passwd|auth|credential/i;
+// Mask any value paired with a sensitive-looking key, in either shape:
+// ["--api-key", "sk-…"] (flag + value) or ["MY_API_KEY=sk-…"] / ["--token=…"]
+// (key=value, e.g. env-wrapper launches). Otherwise the secret would leak into
+// every list_mcp_servers response.
+const SENSITIVE_KEY = /key|token|secret|password|passwd|auth|credential/i;
 
 export function redactSensitiveArgs(args: string[]): string[] {
   const redacted: string[] = [];
   let maskNext = false;
   for (const arg of args) {
+    const eq = arg.indexOf("=");
     if (maskNext) {
       redacted.push("***");
       maskNext = false;
-    } else if (arg.startsWith("-") && SENSITIVE_FLAG.test(arg)) {
-      const eq = arg.indexOf("=");
-      if (eq === -1) {
-        redacted.push(arg);
-        maskNext = true;
-      } else {
-        redacted.push(arg.slice(0, eq + 1) + "***");
-      }
+    } else if (eq !== -1 && SENSITIVE_KEY.test(arg.slice(0, eq))) {
+      redacted.push(arg.slice(0, eq + 1) + "***");
+    } else if (eq === -1 && arg.startsWith("-") && SENSITIVE_KEY.test(arg)) {
+      redacted.push(arg);
+      maskNext = true;
     } else {
       redacted.push(arg);
     }
@@ -74,20 +74,29 @@ export class Broker {
 
   // ── Discovery ──────────────────────────────────────────
 
-  listTools(serverNames?: string[]): { tools: ToolListing[]; unknownServers: string[] } {
+  /**
+   * List indexed tools, optionally filtered by server name. An empty filter is
+   * treated as "no filter" (most forgiving for LLM callers). When a filter is
+   * given, `matchedServers`/`unknownServers` report which names are registered.
+   */
+  listTools(serverNames?: string[]): {
+    tools: ToolListing[];
+    unknownServers: string[];
+    matchedServers?: string[];
+  } {
+    if (!serverNames || serverNames.length === 0) {
+      return { tools: this.store.listAllTools(), unknownServers: [] };
+    }
     const known = new Set(this.store.listServers().map((s) => s.name));
-    const unknownServers = (serverNames ?? []).filter((n) => !known.has(n));
-    return { tools: this.store.listAllTools(serverNames), unknownServers };
+    return {
+      tools: this.store.listAllTools(serverNames),
+      unknownServers: serverNames.filter((n) => !known.has(n)),
+      matchedServers: serverNames.filter((n) => known.has(n)),
+    };
   }
 
   describeTools(refs: ToolRef[]): { found: ToolDetail[]; missing: ToolRef[] } {
-    const found = this.store.getToolDetails(refs);
-    // Key by (server, tool) pair — concatenated "server__tool" ids are ambiguous
-    // when either name itself contains the separator
-    const key = (r: ToolRef) => JSON.stringify([r.server_name, r.tool_name]);
-    const foundKeys = new Set(found.map(key));
-    const missing = refs.filter((r) => !foundKeys.has(key(r)));
-    return { found, missing };
+    return this.store.getToolDetails(refs);
   }
 
   // ── Call Tools ──────────────────────────────────────────

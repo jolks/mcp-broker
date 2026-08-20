@@ -49,7 +49,6 @@ export const BACKGROUND_REFRESH_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // ── Tool listing ────────────────────────────────────────
 
 export const LIST_TOOLS_DESCRIPTION_MAX_CHARS = 120;
-export const TOOL_PREFIX_SEPARATOR = "__";
 
 // ── Error handling ──────────────────────────────────────
 
