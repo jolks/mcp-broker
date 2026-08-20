@@ -46,9 +46,9 @@ describe("Registry integration", { timeout: 60_000 }, () => {
     const toolCount = store.getToolCount("echo");
     expect(toolCount).toBe(2);
 
-    // Verify tools are searchable
-    const results = store.searchTools("echo");
-    expect(results.length).toBeGreaterThan(0);
+    // Verify tools are listed
+    const tools = store.listAllTools(["echo"]);
+    expect(tools.length).toBe(2);
   });
 
   it("startup reads from servers.json and harvests tools into fresh DB", async () => {
@@ -65,8 +65,8 @@ describe("Registry integration", { timeout: 60_000 }, () => {
 
     // Verify tools were harvested from servers.json
     expect(store.getToolCount("echo")).toBe(2);
-    const results = store.searchTools("echo");
-    expect(results.length).toBeGreaterThan(0);
+    const tools = store.listAllTools(["echo"]);
+    expect(tools.length).toBe(2);
 
     await pool.closeAll();
   });
@@ -102,8 +102,8 @@ describe("Registry integration", { timeout: 60_000 }, () => {
 
     // Step 4: verify tools re-harvested from servers.json
     expect(store.getToolCount("echo")).toBe(2);
-    const results = store.searchTools("echo");
-    expect(results.length).toBeGreaterThan(0);
+    const tools = store.listAllTools(["echo"]);
+    expect(tools.length).toBe(2);
 
     await pool.closeAll();
   });

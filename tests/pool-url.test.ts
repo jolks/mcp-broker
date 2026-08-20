@@ -13,7 +13,6 @@ const mockTransport = {
 const mockClient = {
   connect: vi.fn().mockResolvedValue(undefined),
   close: vi.fn().mockResolvedValue(undefined),
-  getServerVersion: vi.fn(),
 };
 
 vi.mock("../src/transport.js", () => ({
@@ -27,7 +26,6 @@ vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
   Client: class MockClient {
     connect = vi.fn().mockResolvedValue(undefined);
     close = vi.fn().mockResolvedValue(undefined);
-    getServerVersion = vi.fn();
   },
 }));
 

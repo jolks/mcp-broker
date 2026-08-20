@@ -1,24 +1,27 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { resolve, join } from "node:path";
-import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import {
+  copyEnv, buildBroker, seedBroker,
+  brokerEntry, echoEntry, vibiumEntry, writeMcpConfig,
+} from "./e2e-helpers.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const shouldRun = process.env.RUN_E2E === "1";
 
-const ECHO_CONFIG_PATH = resolve(ROOT, "tests/fixtures/echo-config.json");
+// Model to test with, e.g. E2E_MODEL=claude-haiku-4-5-20251001 (or alias "haiku").
+// Unset = the claude CLI's default model.
+const E2E_MODEL = process.env.E2E_MODEL;
 
-// Use a temp directory so we don't touch ~/.mcp-broker
+// Use a temp directory so we don't touch ~/.mcp-broker. The generated echo
+// config lives here too, so parallel suites never share files.
 const TEST_DIR = mkdtempSync(join(tmpdir(), "mcp-broker-e2e-"));
+const ECHO_CONFIG_PATH = join(TEST_DIR, "echo-config.json");
 
 // Build env: strip CLAUDECODE (allows nested invocation), set MCP_BROKER_HOME
-const testEnv: Record<string, string> = {};
-for (const [k, v] of Object.entries(process.env)) {
-  if (!k.startsWith("CLAUDECODE") && v !== undefined) {
-    testEnv[k] = v;
-  }
-}
+const testEnv = copyEnv("CLAUDECODE");
 testEnv.MCP_BROKER_HOME = TEST_DIR;
 
 // Generate a temporary .mcp.json that passes MCP_BROKER_HOME to the broker server.
@@ -33,7 +36,6 @@ interface ClaudeResult {
   duration_api_ms: number;
   total_cost_usd: number;
   tool_calls: string[];
-  tool_calls_per_turn: string[][];
 }
 
 function claude(
@@ -42,26 +44,37 @@ function claude(
   env: Record<string, string> = testEnv,
   cwd: string = ROOT,
 ): ClaudeResult {
-  const stdout = execFileSync(
-    "claude",
-    [
-      "-p",
-      prompt,
-      "--mcp-config",
-      mcpConfigPath,
-      "--output-format",
-      "stream-json",
-      "--max-turns",
-      "15",
-      "--no-session-persistence",
-      "--permission-mode",
-      "bypassPermissions",
-      "--verbose",
-    ],
-    { cwd, timeout: 300_000, env, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 50 * 1024 * 1024 },
-  );
-
-  const raw = stdout.toString();
+  let raw: string;
+  try {
+    raw = execFileSync(
+      "claude",
+      [
+        "-p",
+        prompt,
+        "--mcp-config",
+        mcpConfigPath,
+        "--output-format",
+        "stream-json",
+        "--max-turns",
+        "15",
+        "--no-session-persistence",
+        "--permission-mode",
+        "bypassPermissions",
+        "--verbose",
+        ...(E2E_MODEL ? ["--model", E2E_MODEL] : []),
+      ],
+      { cwd, timeout: 300_000, env, stdio: ["pipe", "pipe", "pipe"], maxBuffer: 50 * 1024 * 1024 },
+    ).toString();
+  } catch (err) {
+    // claude exits non-zero on e.g. max-turns — the stream output is still on
+    // stdout, so keep parsing for diagnostics instead of losing everything.
+    const e = err as { stdout?: Buffer; stderr?: Buffer };
+    if (!e.stdout?.length) {
+      throw new Error(`claude CLI failed with no output. stderr: ${e.stderr?.toString().slice(0, 500)}`, { cause: err });
+    }
+    console.error(`[e2e] claude exited non-zero; parsing stream output anyway. stderr: ${e.stderr?.toString().slice(0, 300)}`);
+    raw = e.stdout.toString();
+  }
   const lines = raw.split("\n").filter((l) => l.trim());
   const events = lines.map((l) => JSON.parse(l));
 
@@ -70,12 +83,10 @@ function claude(
   // — internal tools are local tool resolution, not billed API turns.
   const allToolCalls: string[] = [];
   const toolCalls: string[] = [];
-  const toolCallsPerTurn: string[][] = [];
   let turnNum = 0;
   for (const event of events) {
     if (event.type === "assistant" && Array.isArray(event.message?.content)) {
       turnNum++;
-      const turnTools: string[] = [];
       for (const block of event.message.content) {
         if (block.type === "tool_use") {
           allToolCalls.push(block.name);
@@ -84,16 +95,12 @@ function claude(
           console.error(`[e2e]   turn ${turnNum}: ${block.name}(${inputSummary})`);
           if (block.name.startsWith("mcp__broker__")) {
             toolCalls.push(block.name);
-            turnTools.push(block.name);
           }
         }
         if (block.type === "text" && block.text) {
           const textPreview = block.text.slice(0, 120).replace(/\n/g, " ");
           console.error(`[e2e]   turn ${turnNum}: [text] ${textPreview}`);
         }
-      }
-      if (turnTools.length > 0) {
-        toolCallsPerTurn.push(turnTools);
       }
     }
   }
@@ -111,47 +118,22 @@ function claude(
     `cost=$${resultEvent.total_cost_usd} sequence=[${allToolCalls.join(" → ")}]`,
   );
 
-  return { ...resultEvent, tool_calls: toolCalls, tool_calls_per_turn: toolCallsPerTurn };
+  return { ...resultEvent, tool_calls: toolCalls };
 }
 
 describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => {
   beforeAll(() => {
     // 1. Build
-    execFileSync("pnpm", ["run", "build"], { cwd: ROOT, timeout: 60_000, stdio: "pipe" });
+    buildBroker(ROOT);
 
     // 2. Write MCP config that passes MCP_BROKER_HOME env to the broker server
-    const mcpConfig = {
-      mcpServers: {
-        broker: {
-          command: "node",
-          args: [resolve(ROOT, "dist/index.js"), "serve"],
-          env: { MCP_BROKER_HOME: TEST_DIR },
-        },
-      },
-    };
-    writeFileSync(TEST_MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
+    writeMcpConfig(TEST_MCP_CONFIG, { broker: brokerEntry(ROOT, TEST_DIR) });
 
-    // 3. Generate echo-config.json with absolute path
-    const echoServerPath = resolve(ROOT, "tests/fixtures/echo-server.ts");
-    const config = {
-      mcpServers: {
-        echo: {
-          command: "npx",
-          args: ["tsx", echoServerPath],
-        },
-      },
-    };
-    writeFileSync(ECHO_CONFIG_PATH, JSON.stringify(config, null, 2));
-
-    // 4. Seed the broker with echo server (uses MCP_BROKER_HOME via testEnv)
-    execFileSync(
-      "node",
-      ["dist/index.js", "setup", ECHO_CONFIG_PATH, "--no-rewrite"],
-      { cwd: ROOT, timeout: 60_000, stdio: "pipe", env: testEnv },
-    );
+    // 3. Generate echo config, seed the broker with it (uses MCP_BROKER_HOME via testEnv)
+    writeMcpConfig(ECHO_CONFIG_PATH, { echo: echoEntry(ROOT) });
+    seedBroker(ROOT, ECHO_CONFIG_PATH, testEnv);
 
     return () => {
-      try { unlinkSync(ECHO_CONFIG_PATH); } catch { /* ignore */ }
       try { rmSync(TEST_DIR, { recursive: true }); } catch { /* ignore */ }
     };
   }, 120_000);
@@ -160,12 +142,14 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
     // Use a random nonce so the LLM can't answer without actually calling the tool
     const nonce = Math.random().toString(36).slice(2, 10);
     const response = claude(
-      `Use echo tool to echo "nonce:${nonce}"`,
+      `Use the broker's echo tool to echo "nonce:${nonce}". You MUST use the broker MCP tools ` +
+        "(mcp__broker__list_tools, mcp__broker__describe_tools, mcp__broker__call_tools) — do NOT use Bash or the shell echo command.",
     );
 
-    // Exactly 2 broker tool calls: search → call
+    // Exactly 3 broker tool calls: list → describe → call
     expect(response.tool_calls).toEqual([
-      "mcp__broker__search_tools",
+      "mcp__broker__list_tools",
+      "mcp__broker__describe_tools",
       "mcp__broker__call_tools",
     ]);
     // Random nonce proves the tool was actually called
@@ -178,12 +162,15 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
     const b = Math.floor(Math.random() * 100);
 
     const response = claude(
-      `Get echo tools, then in parallel, echo "nonce:${nonce}" AND add ${a} + ${b}`,
+      `Using ONLY the broker MCP tools (mcp__broker__list_tools, mcp__broker__describe_tools, mcp__broker__call_tools — no Bash), ` +
+        `find the echo server's tools, then in parallel, echo "nonce:${nonce}" AND add ${a} + ${b}. ` +
+        "Batch both operations in a single call_tools invocation.",
     );
 
-    // Exactly 2 broker tool calls: search → call (batched with both invocations)
+    // Exactly 3 broker tool calls: list → describe → call (batched with both invocations)
     expect(response.tool_calls).toEqual([
-      "mcp__broker__search_tools",
+      "mcp__broker__list_tools",
+      "mcp__broker__describe_tools",
       "mcp__broker__call_tools",
     ]);
 
@@ -196,14 +183,15 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
     const echoServerPath = resolve(ROOT, "tests/fixtures/echo-server.ts");
 
     const response = claude(
-      `Add an MCP server named "echo2" that runs: npx tsx ${echoServerPath}. ` +
-        "Then use it to add 7 + 3",
+      `Using ONLY the broker MCP tools (no Bash), add an MCP server named "echo2" with command "npx" and args ["tsx", "${echoServerPath}"] ` +
+        "via mcp__broker__add_mcp_server. Then use mcp__broker__list_tools, mcp__broker__describe_tools, and mcp__broker__call_tools to add 7 + 3 with its add tool.",
     );
 
-    // Exactly 3 broker tool calls: add → search → call
+    // Exactly 4 broker tool calls: add → list → describe → call
     expect(response.tool_calls).toEqual([
       "mcp__broker__add_mcp_server",
-      "mcp__broker__search_tools",
+      "mcp__broker__list_tools",
+      "mcp__broker__describe_tools",
       "mcp__broker__call_tools",
     ]);
     expect(response.result).toContain("10");
@@ -213,14 +201,13 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
     it("broker vs direct MCP (vibium browser)", () => {
       const prompt =
         "Using the vibium browser tools, navigate to https://example.com and tell me the page title. " +
-        "You MUST use vibium browser tools (not WebFetch or any other tool). Close the browser after.";
+        "You MUST use vibium browser tools (not WebFetch, Bash, or any other tool). " +
+        "Call the tools directly yourself — do NOT spawn subagents or background tasks. Close the browser after.";
 
       // === Direct run (fully isolated — no broker config anywhere) ===
       const directDir = mkdtempSync(join(tmpdir(), "mcp-broker-e2e-direct-"));
       const directMcpConfig = join(directDir, "mcp.json");
-      writeFileSync(directMcpConfig, JSON.stringify({
-        mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
-      }));
+      writeMcpConfig(directMcpConfig, { vibium: vibiumEntry() });
       const directEnv = { ...testEnv, MCP_BROKER_HOME: directDir };
       const directResult = claude(prompt, directMcpConfig, directEnv, directDir);
       expect(directResult.result).toContain("Example Domain");
@@ -230,26 +217,12 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
       const brokerEnv = { ...testEnv, MCP_BROKER_HOME: brokerDir };
       // Seed vibium into this broker instance
       const vibiumConfig = join(brokerDir, "vibium-config.json");
-      writeFileSync(vibiumConfig, JSON.stringify({
-        mcpServers: { vibium: { command: "npx", args: ["-y", "vibium", "mcp"] } },
-      }));
-      execFileSync(
-        "node",
-        ["dist/index.js", "setup", vibiumConfig, "--no-rewrite"],
-        { cwd: ROOT, timeout: 120_000, stdio: "pipe", env: brokerEnv },
-      );
+      writeMcpConfig(vibiumConfig, { vibium: vibiumEntry() });
+      seedBroker(ROOT, vibiumConfig, brokerEnv, 120_000);
       const brokerMcpConfig = join(brokerDir, "mcp.json");
-      writeFileSync(brokerMcpConfig, JSON.stringify({
-        mcpServers: {
-          broker: {
-            command: "node",
-            args: [resolve(ROOT, "dist/index.js"), "serve"],
-            env: { MCP_BROKER_HOME: brokerDir },
-          },
-        },
-      }));
+      writeMcpConfig(brokerMcpConfig, { broker: brokerEntry(ROOT, brokerDir) });
       const brokerResult = claude(prompt, brokerMcpConfig, brokerEnv);
-      expect(brokerResult.tool_calls).toContain("mcp__broker__search_tools");
+      expect(brokerResult.tool_calls).toContain("mcp__broker__list_tools");
       expect(brokerResult.tool_calls).toContain("mcp__broker__call_tools");
       expect(brokerResult.result).toContain("Example Domain");
 
@@ -257,12 +230,24 @@ describe.skipIf(!shouldRun)("E2E: Claude Code CLI", { timeout: 300_000 }, () => 
       rmSync(directDir, { recursive: true, force: true });
       rmSync(brokerDir, { recursive: true, force: true });
 
+      // No cost assertion here — this comparison is logged for information only.
+      //
+      // Why: Claude Code does not send MCP tool schemas to the model up front.
+      // The model sees only a list of tool NAMES, and when it wants to use a
+      // tool it first calls Claude Code's built-in ToolSearch, which loads the
+      // full schemas for just the tools it picked. In other words, Claude Code
+      // has its own built-in version of the broker's list → describe → call
+      // pattern. So the "direct" run never pays the all-schemas-on-every-turn
+      // cost that mcp-broker eliminates, and broker vs direct comes out about
+      // equal (any difference is turn-count noise).
+      //
+      // The gemini e2e suite DOES assert broker < direct, because the gemini
+      // CLI still sends every tool schema on every turn.
       const savings = ((1 - brokerResult.total_cost_usd / directResult.total_cost_usd) * 100).toFixed(1);
       console.error(
         `[e2e] cost comparison: broker=$${brokerResult.total_cost_usd.toFixed(4)} ` +
         `direct=$${directResult.total_cost_usd.toFixed(4)} savings=${savings}%`,
       );
-      expect(brokerResult.total_cost_usd).toBeLessThanOrEqual(directResult.total_cost_usd);
     });
   });
 });

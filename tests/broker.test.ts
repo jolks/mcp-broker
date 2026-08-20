@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Broker } from "../src/broker.js";
-import type { Store, SearchResult } from "../src/store.js";
+import type { Store, ToolListing, ToolDetail } from "../src/store.js";
 import type { Pool } from "../src/pool.js";
 import type { Registry } from "../src/registry.js";
 import { makeServer, makeUrlServer, makeStore, makePool, makeRegistry } from "./helpers.js";
@@ -27,99 +27,60 @@ describe("Broker", () => {
     broker = new Broker(store, pool, registry);
   });
 
-  // ── searchTools ─────────────────────────────────────
+  // ── listTools ───────────────────────────────────────
 
-  describe("searchTools", () => {
-    it("delegates to store.searchTools", () => {
-      const mockResults: SearchResult[] = [
-        {
-          id: "srv__tool",
-          server_name: "srv",
-          tool_name: "tool",
-          description: "A tool",
-          input_schema: {},
-          rank: -1,
-        },
+  describe("listTools", () => {
+    it("delegates to store.listAllTools without touching server records when unfiltered", () => {
+      const mockTools: ToolListing[] = [
+        { server_name: "srv", tool_name: "tool", description: "A tool" },
       ];
-      vi.mocked(store.searchTools).mockReturnValue(mockResults);
+      vi.mocked(store.listAllTools).mockReturnValue(mockTools);
 
-      const results = broker.searchTools("tool");
-      expect(store.searchTools).toHaveBeenCalledWith("tool", undefined);
-      expect(results).toEqual(mockResults);
+      const result = broker.listTools();
+      expect(result).toEqual({ tools: mockTools, unknownServers: [] });
+      expect(store.listServers).not.toHaveBeenCalled();
     });
 
-    it("passes limit parameter", () => {
-      vi.mocked(store.searchTools).mockReturnValue([]);
-      broker.searchTools("query", 5);
-      expect(store.searchTools).toHaveBeenCalledWith("query", 5);
+    it("treats an empty filter as no filter", () => {
+      vi.mocked(store.listAllTools).mockReturnValue([]);
+      const result = broker.listTools([]);
+      expect(result.matchedServers).toBeUndefined();
+      expect(store.listServers).not.toHaveBeenCalled();
+    });
+
+    it("passes server filter through and splits matched/unknown servers", () => {
+      vi.mocked(store.listAllTools).mockReturnValue([
+        { server_name: "github", tool_name: "t1", description: "T1" },
+      ]);
+      vi.mocked(store.listServers).mockReturnValue([makeServer({ name: "github" })]);
+
+      const result = broker.listTools(["github", "nope"]);
+      expect(store.listAllTools).toHaveBeenCalledWith(["github", "nope"]);
+      expect(result.matchedServers).toEqual(["github"]);
+      expect(result.unknownServers).toEqual(["nope"]);
+      expect(result.tools).toHaveLength(1);
     });
   });
 
-  // ── searchToolsMulti ─────────────────────────────────
+  // ── describeTools ───────────────────────────────────
 
-  describe("searchToolsMulti", () => {
-    it("runs store.searchTools for each query", () => {
-      vi.mocked(store.searchTools).mockReturnValue([]);
-
-      broker.searchToolsMulti(["navigate", "title"]);
-
-      expect(store.searchTools).toHaveBeenCalledTimes(2);
-      expect(store.searchTools).toHaveBeenCalledWith("navigate", 20);
-      expect(store.searchTools).toHaveBeenCalledWith("title", 20);
-    });
-
-    it("deduplicates by id", () => {
-      const tool: SearchResult = {
-        id: "srv__tool",
-        server_name: "srv",
-        tool_name: "tool",
-        description: "A tool",
-        input_schema: {},
-        rank: -2,
+  describe("describeTools", () => {
+    it("delegates to store.getToolDetails", () => {
+      const details: { found: ToolDetail[]; missing: { server_name: string; tool_name: string }[] } = {
+        found: [
+          { server_name: "srv", tool_name: "real", description: "Real", input_schema: { type: "object" } },
+        ],
+        missing: [{ server_name: "srv", tool_name: "fake" }],
       };
-      vi.mocked(store.searchTools).mockReturnValue([tool]);
+      vi.mocked(store.getToolDetails).mockReturnValue(details);
 
-      const results = broker.searchToolsMulti(["q1", "q2"]);
-      expect(results).toHaveLength(1);
-      expect(results[0].id).toBe("srv__tool");
-    });
-
-    it("keeps best rank on overlap (BM25: lower is better)", () => {
-      vi.mocked(store.searchTools)
-        .mockReturnValueOnce([
-          { id: "srv__tool", server_name: "srv", tool_name: "tool", description: "T", input_schema: {}, rank: -3 },
-        ])
-        .mockReturnValueOnce([
-          { id: "srv__tool", server_name: "srv", tool_name: "tool", description: "T", input_schema: {}, rank: -5 },
-        ]);
-
-      const results = broker.searchToolsMulti(["q1", "q2"]);
-      expect(results).toHaveLength(1);
-      expect(results[0].rank).toBe(-5);
-    });
-
-    it("returns results sorted by rank", () => {
-      vi.mocked(store.searchTools)
-        .mockReturnValueOnce([
-          { id: "srv__b", server_name: "srv", tool_name: "b", description: "B", input_schema: {}, rank: -1 },
-        ])
-        .mockReturnValueOnce([
-          { id: "srv__a", server_name: "srv", tool_name: "a", description: "A", input_schema: {}, rank: -3 },
-        ]);
-
-      const results = broker.searchToolsMulti(["q1", "q2"]);
-      expect(results).toHaveLength(2);
-      expect(results[0].id).toBe("srv__a");
-      expect(results[1].id).toBe("srv__b");
-    });
-
-    it("passes custom limit to each query", () => {
-      vi.mocked(store.searchTools).mockReturnValue([]);
-
-      broker.searchToolsMulti(["q1", "q2"], 10);
-
-      expect(store.searchTools).toHaveBeenCalledWith("q1", 10);
-      expect(store.searchTools).toHaveBeenCalledWith("q2", 10);
+      const refs = [
+        { server_name: "srv", tool_name: "real" },
+        { server_name: "srv", tool_name: "fake" },
+      ];
+      const result = broker.describeTools(refs);
+      expect(store.getToolDetails).toHaveBeenCalledWith(refs);
+      expect(result).toBe(details);
     });
   });
 
@@ -350,10 +311,10 @@ describe("Broker", () => {
   // ── listServers ─────────────────────────────────────
 
   describe("listServers", () => {
-    it("enriches with connected status and tool count", () => {
+    it("enriches with connected status, tool count, and source", () => {
       vi.mocked(store.listServers).mockReturnValue([
-        makeServer({ name: "a" }),
-        makeServer({ name: "b" }),
+        makeServer({ name: "a", command: "npx", args: ["-y", "@mcp/a"] }),
+        makeUrlServer({ name: "b", url: "https://mcp.example.com/sse" }),
       ]);
       vi.mocked(pool.isConnected).mockImplementation((name: string) => name === "a");
       vi.mocked(store.getToolCount).mockImplementation((name: string) =>
@@ -362,73 +323,60 @@ describe("Broker", () => {
 
       const result = broker.listServers();
       expect(result).toEqual([
-        { name: "a", connected: true, toolCount: 2 },
-        { name: "b", connected: false, toolCount: 0 },
+        { name: "a", connected: true, toolCount: 2, source: "npx -y @mcp/a", envKeys: [], headerKeys: [] },
+        { name: "b", connected: false, toolCount: 0, source: "https://mcp.example.com/sse", envKeys: [], headerKeys: [] },
       ]);
+    });
+
+    it("never exposes env values, only key names", () => {
+      vi.mocked(store.listServers).mockReturnValue([
+        makeServer({ name: "a", command: "node", args: ["srv.js"], env: { TOKEN: "sekret" } }),
+      ]);
+
+      const result = broker.listServers();
+      expect(result[0].envKeys).toEqual(["TOKEN"]);
+      expect(JSON.stringify(result)).not.toContain("sekret");
+    });
+
+    it("never exposes header values, only key names", () => {
+      vi.mocked(store.listServers).mockReturnValue([
+        makeUrlServer({ name: "b", headers: { Authorization: "Bearer xyz123" } }),
+      ]);
+
+      const result = broker.listServers();
+      expect(result[0].headerKeys).toEqual(["Authorization"]);
+      expect(JSON.stringify(result)).not.toContain("xyz123");
+    });
+
+    it("redacts secret-looking args in source", () => {
+      vi.mocked(store.listServers).mockReturnValue([
+        makeServer({
+          name: "a",
+          command: "npx",
+          args: ["some-server", "--api-key", "sk-live-abc123", "--token=tok456", "--verbose"],
+        }),
+      ]);
+
+      const result = broker.listServers();
+      expect(result[0].source).toBe("npx some-server --api-key *** --token=*** --verbose");
+    });
+
+    it("redacts KEY=value args without a leading dash (env-wrapper launches)", () => {
+      vi.mocked(store.listServers).mockReturnValue([
+        makeServer({
+          name: "a",
+          command: "env",
+          args: ["MY_API_KEY=sk-live-xyz", "LOG_LEVEL=debug", "npx", "server-x"],
+        }),
+      ]);
+
+      const result = broker.listServers();
+      expect(result[0].source).toBe("env MY_API_KEY=*** LOG_LEVEL=debug npx server-x");
     });
 
     it("returns empty array when no servers", () => {
       vi.mocked(store.listServers).mockReturnValue([]);
       expect(broker.listServers()).toEqual([]);
-    });
-  });
-
-  // ── getServer ──────────────────────────────────────
-
-  describe("getServer", () => {
-    it("returns enriched server detail", () => {
-      vi.mocked(store.getServer).mockReturnValue(
-        makeServer({ name: "github", command: "npx", args: ["@mcp/github"], env: { TOKEN: "abc" } })
-      );
-      vi.mocked(pool.isConnected).mockReturnValue(true);
-      vi.mocked(store.getToolCount).mockReturnValue(3);
-      vi.mocked(store.getToolsForServer).mockReturnValue([
-        { tool_name: "create_issue", description: "Create an issue" },
-        { tool_name: "list_repos", description: "List repos" },
-        { tool_name: "get_pr", description: "Get a PR" },
-      ]);
-
-      const result = broker.getServer("github");
-      expect(result).toEqual({
-        name: "github",
-        command: "npx",
-        args: ["@mcp/github"],
-        env: { TOKEN: "abc" },
-        connected: true,
-        toolCount: 3,
-        tools: [
-          { tool_name: "create_issue", description: "Create an issue" },
-          { tool_name: "list_repos", description: "List repos" },
-          { tool_name: "get_pr", description: "Get a PR" },
-        ],
-      });
-    });
-
-    it("returns undefined for missing server", () => {
-      vi.mocked(store.getServer).mockReturnValue(undefined);
-      expect(broker.getServer("missing")).toBeUndefined();
-    });
-
-    it("includes version when pool provides it", () => {
-      vi.mocked(store.getServer).mockReturnValue(makeServer({ name: "srv" }));
-      vi.mocked(pool.isConnected).mockReturnValue(true);
-      vi.mocked(store.getToolCount).mockReturnValue(1);
-      vi.mocked(store.getToolsForServer).mockReturnValue([]);
-      vi.mocked(pool.getServerVersion).mockReturnValue({ name: "srv", version: "1.2.3" });
-
-      const result = broker.getServer("srv");
-      expect(result?.version).toBe("1.2.3");
-    });
-
-    it("omits version when pool returns undefined", () => {
-      vi.mocked(store.getServer).mockReturnValue(makeServer({ name: "srv" }));
-      vi.mocked(pool.isConnected).mockReturnValue(true);
-      vi.mocked(store.getToolCount).mockReturnValue(1);
-      vi.mocked(store.getToolsForServer).mockReturnValue([]);
-      vi.mocked(pool.getServerVersion).mockReturnValue(undefined);
-
-      const result = broker.getServer("srv");
-      expect(result?.version).toBeUndefined();
     });
   });
 

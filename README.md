@@ -14,11 +14,13 @@ Configure one MCP server instead of dozens. mcp-broker acts as a single gateway 
 
 mcp-broker maintains a single `servers.json` registry. Any AI client that connects to mcp-broker gets access to all your MCP servers. Set up once, add mcp-broker to each client, done. Because it speaks standard MCP, it works with any AI client or LLM that supports the protocol — no vendor lock-in.
 
-Instead of exposing all tools, mcp-broker exposes **7 meta-tools**. The LLM searches for relevant tools on-demand via FTS5 full-text search, then calls them through the broker. `search_tools` supports multi-query search — the LLM can search for multiple aspects of a task in a single call:
+Instead of exposing all tools, mcp-broker exposes **7 meta-tools**. Discovery works the way an LLM uses CLI tools — browse the command list, read the `--help`, then run. The LLM does the "search" itself by reading a compact listing, so there is no keyword-matching layer to miss the right tool:
 
 ```
-LLM → search_tools(queries: ["browser navigate", "page title", "browser close"])
-    → FTS5 lookup per query → deduplicated, ranked results
+LLM → list_tools()
+    → one compact line per tool (name — description), grouped by server
+LLM → describe_tools([{server_name: "vibium", tool_name: "browser_navigate"}, ...])
+    → full input schemas for just the tools the LLM picked
 LLM → call_tools([{server_name: "vibium", tool_name: "browser_navigate", arguments: {...}}, ...])
     → broker routes each invocation to its downstream server
 ```
@@ -80,13 +82,13 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 
 | Tool | Description |
 |---|---|
-| `search_tools` | Full-text search across all servers' tools. Accepts `query` (single) or `queries` (array for multi-aspect search in one call). Returns names, descriptions, and input schemas. Description is dynamic — includes actual server names and total tool count. |
-| `call_tools` | Invoke one or more discovered tools via search_tools results. Multiple invocations execute in parallel. |
-| `add_mcp_server` | Register a new MCP server. Harvests and indexes its tools. |
+| `list_tools` | Browse all tools, one compact line each (name — short description), grouped by server. Optional `server_names` filter. Description is dynamic — includes actual server names and total tool count. |
+| `describe_tools` | Get full input schemas for specific tools picked from the list — the `--help` step before calling. |
+| `call_tools` | Invoke one or more discovered tools. Multiple invocations execute in parallel; `sequential: true` for ordered steps. |
+| `add_mcp_server` | Register a new MCP server. Harvests its tools into the listing. |
 | `remove_mcp_server` | Remove a server and its indexed tools. |
-| `list_mcp_servers` | List all servers with connection status and tool counts. Guides toward search_tools when search returns no results. |
-| `get_mcp_server` | Get detailed info for a server including version, all tool names. Guides toward search_tools for schema lookup. |
-| `update_mcp_server` | Update a server's config (command, args, env). Re-harvests and reconnects. |
+| `list_mcp_servers` | List all servers with connection status, tool count, launch command or URL (secret-looking args redacted), and env/header key names (values never exposed). |
+| `update_mcp_server` | Update a server's config (command, args, env, url, headers). Re-harvests and reconnects. |
 
 ## Architecture
 
@@ -95,12 +97,12 @@ After setup, manage servers through the LLM or edit `servers.json` directly.
 │  LLM client │◄────►│  mcp-broker │◄────►│  GitHub server   │
 │             │ MCP  │             │ MCP  │  Filesystem srv  │
 │             │      │  SQLite DB  │      │  Slack server    │
-│             │      │  FTS5 index │      │  ...             │
+│             │      │  tool index │      │  ...             │
 └─────────────┘      └─────────────┘      └──────────────────┘
 ```
 
 - **Registry** — `servers.json` is the source of truth. SQLite is a rebuildable index — delete the DB and it's rebuilt on next startup.
-- **Store** — SQLite + FTS5 with Porter stemming for fast full-text search. On startup, servers with tools older than 5 minutes are re-harvested in the background (non-blocking). To pick up tool changes from a server upgrade, restart mcp-broker or your LLM client.
+- **Store** — SQLite index of harvested tool names, descriptions, and schemas. On startup, servers with tools older than 5 minutes are re-harvested in the background (non-blocking). To pick up tool changes from a server upgrade, restart mcp-broker or your LLM client.
 - **Pool** — Eager connection manager with auto-reconnect.
 - **Harvester** — Discovers tools from a server via `tools/list` with pagination.
 
@@ -116,7 +118,7 @@ npx mcp-broker restore <config>   # Restore a client config (e.g. ~/.cursor/mcp.
 
 ## Token Savings
 
-mcp-broker replaces all your tool schemas with 7 fixed meta-tool schemas (~1,400 tokens). Savings compound on every turn.
+mcp-broker replaces all your tool schemas with 7 fixed meta-tool schemas (~1,400 tokens). How much that saves depends heavily on your client:
 
 | Tools | 5-turn task | 20-turn task | Savings |
 |---|---|---|---|
@@ -125,9 +127,9 @@ mcp-broker replaces all your tool schemas with 7 fixed meta-tool schemas (~1,400
 | 100 | 42,350 tokens saved | 171,350 saved | ~86% |
 | 200 | 92,350 tokens saved | 371,350 saved | ~93% |
 
-Break-even is ~14 tools. Below that, direct configuration is simpler.
+The table assumes the client resends all tool schemas uncached every turn. Break-even is ~14 tools; below that, direct configuration is simpler.
 
-**Prompt caching note:** Some providers (Anthropic, OpenAI) cache repeated tool schemas at a discount on subsequent turns, which reduces direct MCP's per-turn cost. The broker still saves by eliminating turns entirely (batching multiple tool calls into one). See [Token Savings Analysis](docs/token-savings.md) for the full breakdown including the impact of prompt caching.
+**Modern clients change this math.** Claude Code no longer sends MCP schemas up front (its built-in ToolSearch loads schemas on demand — the same list → describe → call pattern the broker uses), and current Gemini CLI caches the schema block near-perfectly after the first turn. On such clients, measured savings at ~85 tools are near zero or slightly negative for short tasks, because the broker's discovery adds conversation turns. The broker's token advantage remains for clients without schema caching/deferral, for large registries browsed with the `server_names` filter, and for long sessions — and its config-centralization value (one `servers.json` for every client) is independent of tokens. See [Token Savings Analysis](docs/token-savings.md) for details.
 
 ## Requirements
 

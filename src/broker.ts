@@ -1,10 +1,10 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Store, type ServerRecord, type SearchResult, type ToolSummary, isUrlServer } from "./store.js";
+import { Store, type ServerRecord, type ToolListing, type ToolRef, type ToolDetail, isUrlServer } from "./store.js";
 import { Pool } from "./pool.js";
 import { Registry } from "./registry.js";
 import { harvestTools } from "./harvester.js";
 import { logger } from "./logger.js";
-import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS, DEFAULT_SEARCH_LIMIT } from "./config.js";
+import { getErrorMessage, BACKGROUND_REFRESH_TTL_MS } from "./config.js";
 import { type McpServerEntry, entryToRecord, recordToEntry } from "./client-config.js";
 
 export interface ToolInvocation {
@@ -25,17 +25,39 @@ export interface CallToolsOptions {
   sequential?: boolean;
 }
 
-export interface ServerDetail {
+export interface ServerSummary {
   name: string;
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  headers?: Record<string, string>;
   connected: boolean;
   toolCount: number;
-  tools: ToolSummary[];
-  version?: string;
+  source: string; // launch command for stdio servers, URL for URL servers
+  envKeys: string[]; // env var names for stdio servers — values never exposed
+  headerKeys: string[]; // header names for URL servers — values never exposed
+}
+
+// Mask any value paired with a sensitive-looking key, in either shape:
+// ["--api-key", "sk-…"] (flag + value) or ["MY_API_KEY=sk-…"] / ["--token=…"]
+// (key=value, e.g. env-wrapper launches). Otherwise the secret would leak into
+// every list_mcp_servers response.
+const SENSITIVE_KEY = /key|token|secret|password|passwd|auth|credential/i;
+
+export function redactSensitiveArgs(args: string[]): string[] {
+  const redacted: string[] = [];
+  let maskNext = false;
+  for (const arg of args) {
+    const eq = arg.indexOf("=");
+    if (maskNext) {
+      redacted.push("***");
+      maskNext = false;
+    } else if (eq !== -1 && SENSITIVE_KEY.test(arg.slice(0, eq))) {
+      redacted.push(arg.slice(0, eq + 1) + "***");
+    } else if (eq === -1 && arg.startsWith("-") && SENSITIVE_KEY.test(arg)) {
+      redacted.push(arg);
+      maskNext = true;
+    } else {
+      redacted.push(arg);
+    }
+  }
+  return redacted;
 }
 
 export class Broker {
@@ -50,24 +72,31 @@ export class Broker {
     this.registry = registry;
   }
 
-  // ── Search ─────────────────────────────────────────────
+  // ── Discovery ──────────────────────────────────────────
 
-  searchTools(query: string, limit?: number): SearchResult[] {
-    return this.store.searchTools(query, limit);
+  /**
+   * List indexed tools, optionally filtered by server name. An empty filter is
+   * treated as "no filter" (most forgiving for LLM callers). When a filter is
+   * given, `matchedServers`/`unknownServers` report which names are registered.
+   */
+  listTools(serverNames?: string[]): {
+    tools: ToolListing[];
+    unknownServers: string[];
+    matchedServers?: string[];
+  } {
+    if (!serverNames || serverNames.length === 0) {
+      return { tools: this.store.listAllTools(), unknownServers: [] };
+    }
+    const known = new Set(this.store.listServers().map((s) => s.name));
+    return {
+      tools: this.store.listAllTools(serverNames),
+      unknownServers: serverNames.filter((n) => !known.has(n)),
+      matchedServers: serverNames.filter((n) => known.has(n)),
+    };
   }
 
-  searchToolsMulti(queries: string[], limit?: number): SearchResult[] {
-    const perQuery = limit ?? DEFAULT_SEARCH_LIMIT;
-    const seen = new Map<string, SearchResult>();
-    for (const query of queries) {
-      for (const result of this.store.searchTools(query, perQuery)) {
-        const existing = seen.get(result.id);
-        if (!existing || result.rank < existing.rank) {
-          seen.set(result.id, result); // keep best rank (BM25: lower = better)
-        }
-      }
-    }
-    return Array.from(seen.values()).sort((a, b) => a.rank - b.rank);
+  describeTools(refs: ToolRef[]): { found: ToolDetail[]; missing: ToolRef[] } {
+    return this.store.getToolDetails(refs);
   }
 
   // ── Call Tools ──────────────────────────────────────────
@@ -185,29 +214,19 @@ export class Broker {
     logger.info(`Removed server "${name}"`);
   }
 
-  listServers(): Array<{ name: string; connected: boolean; toolCount: number }> {
+  listServers(): ServerSummary[] {
     const servers = this.store.listServers();
     return servers.map((s) => ({
       name: s.name,
       connected: this.pool.isConnected(s.name),
       toolCount: this.store.getToolCount(s.name),
+      // Env/header values and secret-looking args are deliberately excluded or
+      // redacted (may contain API keys); key names are exposed so
+      // update_mcp_server callers know which vars exist and must be preserved
+      source: isUrlServer(s) ? s.url : [s.command, ...redactSensitiveArgs(s.args)].join(" "),
+      envKeys: isUrlServer(s) ? [] : Object.keys(s.env ?? {}),
+      headerKeys: isUrlServer(s) ? Object.keys(s.headers ?? {}) : [],
     }));
-  }
-
-  getServer(name: string): ServerDetail | undefined {
-    const server = this.store.getServer(name);
-    if (!server) return undefined;
-    const base = {
-      name: server.name,
-      connected: this.pool.isConnected(server.name),
-      toolCount: this.store.getToolCount(server.name),
-      tools: this.store.getToolsForServer(server.name),
-      version: this.pool.getServerVersion(server.name)?.version,
-    };
-    if (isUrlServer(server)) {
-      return { ...base, url: server.url, headers: server.headers };
-    }
-    return { ...base, command: server.command, args: server.args, env: server.env };
   }
 
   async updateServer(name: string, updates: ServerUpdate): Promise<{ toolCount: number }> {

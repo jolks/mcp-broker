@@ -8,9 +8,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Broker, type ToolInvocation, type ServerUpdate } from "./broker.js";
-import type { ServerRecord } from "./store.js";
+import type { ServerRecord, ToolRef } from "./store.js";
 import { logger } from "./logger.js";
-import { VERSION, SERVER_NAME, DEFAULT_SEARCH_LIMIT, getErrorMessage } from "./config.js";
+import { VERSION, SERVER_NAME, LIST_TOOLS_DESCRIPTION_MAX_CHARS, getErrorMessage } from "./config.js";
 
 // ── Response helpers ────────────────────────────────────
 
@@ -26,35 +26,89 @@ function textResult(text: string): CallToolResult {
 
 export const META_TOOLS: Tool[] = [
   {
-    name: "search_tools",
+    name: "list_tools",
     description:
-      "ALWAYS call this FIRST before attempting any task. " +
-      "Searches all connected MCP servers for relevant tools. " +
-      "Returns tool names, descriptions, and input schemas. " +
-      "Use call_tools with the server_name and tool_name from results to invoke them.",
+      "START HERE for any task. Lists every tool available through this gateway, grouped by server, " +
+      "one line per tool (name — short description) — like browsing a CLI's command list. " +
+      "Pass server_names to only list tools from specific servers. " +
+      "Next step: describe_tools to get input schemas for the tools you pick, then call_tools to run them.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        query: {
-          type: "string",
-          description: "Natural language search query (e.g., 'create github issue', 'read file', 'send email')",
-        },
-        queries: {
+        server_names: {
           type: "array",
           items: { type: "string" },
           description:
-            "Array of search queries to run independently and merge results. " +
-            "Use when you need tools for different aspects of a task.",
+            "Optional: restrict listing to these servers (names as shown by list_mcp_servers). " +
+            "Omit to list all tools from all servers.",
         },
       },
       required: [],
     },
-    annotations: { title: "Search Available Tools", readOnlyHint: true },
+    annotations: { title: "List Available Tools", readOnlyHint: true },
+  },
+  {
+    name: "describe_tools",
+    description:
+      "Get the full input schemas for specific tools found via list_tools — like reading --help " +
+      "before running a command. ALWAYS describe a tool before calling it for the first time; " +
+      "never guess arguments. Batch every tool you plan to use into one call.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        tools: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              server_name: { type: "string", description: "Server name from list_tools" },
+              tool_name: { type: "string", description: "Tool name from list_tools" },
+            },
+            required: ["server_name", "tool_name"],
+          },
+          description: "Tools to describe (from list_tools output)",
+        },
+      },
+      required: ["tools"],
+    },
+    annotations: { title: "Describe Tools", readOnlyHint: true },
+  },
+  {
+    name: "call_tools",
+    description:
+      "Call tools discovered via list_tools. " +
+      "You SHOULD call describe_tools first — argument schemas come from there. " +
+      "Pass an array of invocations (parallel by default). " +
+      "Set sequential: true when steps must run in order and all arguments are known upfront.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        invocations: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              server_name: { type: "string", description: "Server name from list_tools" },
+              tool_name: { type: "string", description: "Tool name from list_tools" },
+              arguments: { type: "object", description: "Arguments for the tool (see input schema from describe_tools)" },
+            },
+            required: ["server_name", "tool_name"],
+          },
+          description: "Array of tool invocations",
+        },
+        sequential: {
+          type: "boolean",
+          description: "Execute invocations in order (not parallel). Use when steps must run in sequence and all arguments are known upfront.",
+        },
+      },
+      required: ["invocations"],
+    },
+    annotations: { title: "Invoke Tools", openWorldHint: true },
   },
   {
     name: "add_mcp_server",
     description:
-      "Register a new MCP server (stdio or URL-based). The server will be connected, its tools harvested and indexed for search. " +
+      "Register a new MCP server (stdio or URL-based). The server will be connected, its tools harvested and added to the tool listing. " +
       "Provide either command (stdio) or url (SSE/Streamable HTTP), not both.",
     inputSchema: {
       type: "object" as const,
@@ -96,31 +150,6 @@ export const META_TOOLS: Tool[] = [
     annotations: { destructiveHint: true },
   },
   {
-    name: "list_mcp_servers",
-    description:
-      "List all registered MCP servers with connection status and tool counts. " +
-      "Use when search_tools returns no results to see what servers are available, then refine your search query.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {},
-    },
-    annotations: { title: "List Servers", readOnlyHint: true },
-  },
-  {
-    name: "get_mcp_server",
-    description:
-      "Get detailed info for a server including all its tool names. " +
-      "Use to see what tools a specific server offers, then call search_tools with better keywords.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        name: { type: "string", description: "Name of the server to inspect" },
-      },
-      required: ["name"],
-    },
-    annotations: { title: "Server Details", readOnlyHint: true },
-  },
-  {
     name: "update_mcp_server",
     description:
       "Update a registered MCP server's configuration. Only provided fields are changed. " +
@@ -138,7 +167,9 @@ export const META_TOOLS: Tool[] = [
         env: {
           type: "object",
           additionalProperties: { type: "string" },
-          description: "New environment variables (replaces all existing env vars)",
+          description:
+            "New environment variables. Replaces ALL existing env vars — check current key names " +
+            "via list_mcp_servers and include every var you want to keep.",
         },
         url: { type: "string", description: "New URL for SSE/Streamable HTTP server" },
         headers: {
@@ -152,40 +183,34 @@ export const META_TOOLS: Tool[] = [
     annotations: { idempotentHint: true },
   },
   {
-    name: "call_tools",
+    name: "list_mcp_servers",
     description:
-      "Call tools discovered via search_tools. " +
-      "You MUST call search_tools first — tool names and schemas come from search results. " +
-      "Pass an array of invocations (parallel by default). " +
-      "Set sequential: true when steps must run in order and all arguments are known upfront.",
+      "List all registered MCP servers with connection status, tool count, and how each is launched (command or URL). " +
+      "Use list_tools to browse the tools they provide.",
     inputSchema: {
       type: "object" as const,
-      properties: {
-        invocations: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              server_name: { type: "string", description: "Server name from search results" },
-              tool_name: { type: "string", description: "Tool name from search results" },
-              arguments: { type: "object", description: "Arguments for the tool (see input_schema from search results)" },
-            },
-            required: ["server_name", "tool_name"],
-          },
-          description: "Array of tool invocations",
-        },
-        sequential: {
-          type: "boolean",
-          description: "Execute invocations in order (not parallel). Use when steps must run in sequence and all arguments are known upfront.",
-        },
-      },
-      required: ["invocations"],
+      properties: {},
     },
-    annotations: { title: "Invoke Tools", openWorldHint: true },
+    annotations: { title: "List Servers", readOnlyHint: true },
   },
 ];
 
 const META_TOOL_NAMES = new Set(META_TOOLS.map((t) => t.name));
+
+// ── Description truncation for list_tools ────────────────
+
+/** First non-empty line of a tool description, hard-capped for compact listings. */
+export function truncateDescription(desc: string): string {
+  const firstLine = desc.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  if (!firstLine) return "(no description)";
+  // UTF-16 length >= code-point count, so anything under the cap here fits
+  if (firstLine.length <= LIST_TOOLS_DESCRIPTION_MAX_CHARS) return firstLine;
+  // Slice by code point — a plain .slice() can split an astral char (e.g. emoji)
+  // straddling the cap, leaving a lone surrogate in the output
+  const chars = Array.from(firstLine);
+  if (chars.length <= LIST_TOOLS_DESCRIPTION_MAX_CHARS) return firstLine;
+  return chars.slice(0, LIST_TOOLS_DESCRIPTION_MAX_CHARS - 1).join("").trimEnd() + "…";
+}
 
 // ── Dynamic description builder ──────────────────────────
 
@@ -195,7 +220,7 @@ export function buildDynamicTools(
   const totalTools = servers.reduce((sum, s) => sum + s.toolCount, 0);
 
   return META_TOOLS.map((t) => {
-    if (t.name !== "search_tools" || servers.length === 0) return t;
+    if (t.name !== "list_tools" || servers.length === 0) return t;
 
     const MAX_LISTED = 10;
     const names = servers.map((s) => s.name);
@@ -207,9 +232,10 @@ export function buildDynamicTools(
     return {
       ...t,
       description:
-        `ALWAYS call this FIRST. This gateway provides access to ${totalTools} tools ` +
+        `START HERE for any task. This gateway provides ${totalTools} tools ` +
         `across ${servers.length} server(s) (${serverNames}). ` +
-        "Search by keyword to discover tools, then use call_tools to invoke them.",
+        "Lists every tool, one line each, grouped by server. Optionally filter with server_names. " +
+        "Then use describe_tools to get input schemas, and call_tools to invoke.",
     };
   });
 }
@@ -225,15 +251,20 @@ export async function startServer(broker: Broker): Promise<Server> {
       },
       instructions:
         "mcp-broker is a tool gateway that provides access to tools from many other MCP servers. " +
-        "You do NOT have direct access to those tools — you must first discover them.\n\n" +
+        "You do NOT have direct access to those tools — discover them the way you would CLI commands: " +
+        "browse the list, read the help, then run.\n\n" +
         "WORKFLOW:\n" +
-        "1. ALWAYS call search_tools first to find ALL tools you will need for the task. Use queries (array) to search for multiple aspects at once.\n" +
-        "2. search_tools returns tool names, descriptions, and input schemas.\n" +
-        "3. Use call_tools to invoke discovered tools:\n" +
+        "1. list_tools — browse all available tools (one compact line each, grouped by server). " +
+        "Filter with server_names when you already know which server you need.\n" +
+        "2. describe_tools — get full input schemas for ALL tools you plan to use, batched in ONE call. " +
+        "Never call a tool whose schema you have not seen.\n" +
+        "3. call_tools — invoke tools:\n" +
         "   - Independent operations: batch in one call (parallel by default)\n" +
-        "   - Sequential workflows (step1 → step2 → ...): batch with sequential: true\n" +
-        "   - Only use separate call_tools calls when you need to inspect an intermediate result before deciding the next step\n\n" +
-        "IMPORTANT: Do not guess tool names. Always search first.",
+        "   - Sequential workflows (step1 → step2 → ...) with all arguments known upfront: batch with sequential: true\n" +
+        "   - Only use separate call_tools calls when you must inspect an intermediate result first\n\n" +
+        "list_mcp_servers shows registered servers (status, tool count, command/URL) and is mainly for " +
+        "managing servers with add/update/remove_mcp_server.\n\n" +
+        "IMPORTANT: Do not guess tool names or arguments — list first, describe before calling.",
     }
   );
 
@@ -285,49 +316,92 @@ export async function handleMetaTool(
   args: Record<string, unknown>
 ): Promise<CallToolResult> {
   switch (name) {
-    case "search_tools": {
-      const query = args.query as string | undefined;
-      const queries = args.queries as string[] | undefined;
-
-      if (query && queries) {
-        return errorResult("Error: provide either 'query' or 'queries', not both");
-      }
-      if (!query && !queries) {
-        return errorResult("Error: 'query' or 'queries' is required");
-      }
-      if (queries && queries.length === 0) {
-        return errorResult("Error: 'queries' must be a non-empty array");
+    case "list_tools": {
+      const serverNames = args.server_names as string[] | undefined;
+      if (serverNames !== undefined) {
+        if (!Array.isArray(serverNames) || serverNames.some((n) => typeof n !== "string")) {
+          return errorResult("Error: 'server_names' must be an array of strings");
+        }
       }
 
-      const limit = args.limit as number | undefined;
-      const isMulti = !!queries;
-      const results = isMulti
-        ? broker.searchToolsMulti(queries, limit)
-        : broker.searchTools(query!, limit);
+      // matchedServers is present only when a non-empty filter was given
+      const { tools, unknownServers, matchedServers } = broker.listTools(serverNames);
 
-      if (results.length === 0) {
-        const searchDesc = isMulti ? `[${queries.join(", ")}]` : `"${query}"`;
-        return textResult(`No tools found matching ${searchDesc}. Try different keywords, or call list_mcp_servers to browse available servers.`);
+      if (matchedServers && matchedServers.length === 0) {
+        return errorResult(
+          `Unknown server(s): ${unknownServers.join(", ")}. Call list_mcp_servers to see registered servers.`
+        );
+      }
+      if (tools.length === 0) {
+        if (matchedServers) {
+          const unknownNote = unknownServers.length > 0
+            ? ` Unknown server(s): ${unknownServers.join(", ")}.`
+            : "";
+          return textResult(
+            `No tools indexed for server(s): ${matchedServers.join(", ")}.${unknownNote} ` +
+            "Call list_tools without server_names to browse all tools, or list_mcp_servers to check registered servers."
+          );
+        }
+        return textResult(
+          "No tools indexed. Use list_mcp_servers to check registered servers, or add_mcp_server to add one."
+        );
       }
 
-      // Build response with schemas so the LLM can use call_tools
-      const lines = results.map((t, i) => {
-        const schema = t.input_schema as Record<string, unknown>;
-        const props = schema.properties ? JSON.stringify(schema.properties) : "{}";
-        return `${i + 1}. ${t.server_name} / ${t.tool_name} — ${t.description}\n   Input: ${props}`;
+      // Group by server, one compact line per tool
+      const byServer = new Map<string, typeof tools>();
+      for (const t of tools) {
+        const group = byServer.get(t.server_name);
+        if (group) group.push(t);
+        else byServer.set(t.server_name, [t]);
+      }
+
+      const sections: string[] = [];
+      for (const [serverName, serverTools] of byServer) {
+        const lines = serverTools.map((t) => `${t.tool_name} — ${truncateDescription(t.description)}`);
+        sections.push(`## ${serverName} (${serverTools.length} tools)\n${lines.join("\n")}`);
+      }
+
+      const header = `${tools.length} tools across ${byServer.size} servers:\n\n`;
+      const unknownNote = unknownServers.length > 0
+        ? `\n\n(Note: unknown server(s) ignored: ${unknownServers.join(", ")})`
+        : "";
+      const footer =
+        "\n\nNext: call describe_tools with every tool you plan to use (batch them in one call) " +
+        "to get input schemas, then call_tools to invoke.";
+
+      return textResult(header + sections.join("\n\n") + unknownNote + footer);
+    }
+
+    case "describe_tools": {
+      const refs = args.tools as ToolRef[] | undefined;
+      if (!Array.isArray(refs) || refs.length === 0) {
+        return errorResult("Error: 'tools' must be a non-empty array of { server_name, tool_name }");
+      }
+      if (refs.some((r) => typeof r?.server_name !== "string" || typeof r?.tool_name !== "string")) {
+        return errorResult("Error: each entry in 'tools' must have string 'server_name' and 'tool_name'");
+      }
+
+      const { found, missing } = broker.describeTools(refs);
+      if (found.length === 0) {
+        return errorResult(
+          `No matching tools found: ${refs.map((r) => `${r.server_name} / ${r.tool_name}`).join(", ")}. ` +
+          "Check exact names via list_tools."
+        );
+      }
+
+      const sections = found.map((t) => {
+        const desc = t.description ? `${t.description}\n` : "";
+        return `## ${t.server_name} / ${t.tool_name}\n${desc}Input schema: ${JSON.stringify(t.input_schema)}`;
       });
 
-      const header = isMulti
-        ? `Found ${results.length} tool(s) across ${queries.length} queries:\n\n`
-        : `Found ${results.length} tool(s) matching "${query}":\n\n`;
+      const missingNote = missing.length > 0
+        ? `\n\nNot found: ${missing.map((r) => `${r.server_name} / ${r.tool_name}`).join(", ")} (check names via list_tools)`
+        : "";
+      const footer =
+        "\n\nUse call_tools with server_name, tool_name, and arguments matching the schema. " +
+        "Batch independent calls; use sequential: true for ordered steps.";
 
-      const effectiveLimit = limit ?? DEFAULT_SEARCH_LIMIT;
-      const truncated = !isMulti && results.length >= effectiveLimit;
-      const footer = truncated
-        ? `\n\nShowing top ${results.length} results (more may exist — refine your query or increase limit). Use call_tools with server_name and tool_name to invoke.`
-        : "\n\nUse call_tools with server_name and tool_name to invoke.";
-
-      return textResult(header + lines.join("\n\n") + footer);
+      return textResult(sections.join("\n\n") + missingNote + footer);
     }
 
     case "add_mcp_server": {
@@ -348,7 +422,10 @@ export async function handleMetaTool(
           ? { name: serverName, url, headers: args.headers as Record<string, string> | undefined }
           : { name: serverName, command: command!, args: (args.args as string[]) ?? [], env: args.env as Record<string, string> | undefined };
         const { toolCount } = await broker.addServer(server);
-        return textResult(`Added server "${serverName}" with ${toolCount} tools.`);
+        return textResult(
+          `Added server "${serverName}" with ${toolCount} tools. ` +
+          `Use list_tools with server_names: ["${serverName}"] to browse them.`
+        );
       } catch (err) {
         return errorResult(`Failed to add server "${serverName}": ${getErrorMessage(err)}`);
       }
@@ -368,50 +445,19 @@ export async function handleMetaTool(
       if (servers.length === 0) {
         return textResult("No servers registered. Use add_mcp_server or run `mcp-broker import <config-path>` to add servers.");
       }
-      const lines = servers.map(
-        (s) => `- **${s.name}**: ${s.toolCount} tools | ${s.connected ? "connected" : "disconnected"}`
-      );
-      return textResult(lines.join("\n") + "\n\nTo find and call specific tools, use search_tools with a keyword.");
-    }
-
-    case "get_mcp_server": {
-      const serverName = args.name as string;
-      if (!serverName) {
-        return errorResult("Error: 'name' is required");
-      }
-      const server = broker.getServer(serverName);
-      if (!server) {
-        return errorResult(`Server "${serverName}" not found.`);
-      }
-
-      const lines = [`**${server.name}**`];
-      if (server.url) {
-        lines.push(`- URL: \`${server.url}\``);
-        const headerKeys = server.headers ? Object.keys(server.headers) : [];
-        lines.push(`- Headers: ${headerKeys.length > 0 ? headerKeys.join(", ") : "(none)"}`);
-      } else {
-        lines.push(`- Command: \`${server.command}\``);
-        lines.push(`- Args: ${server.args && server.args.length > 0 ? server.args.map((a: string) => `\`${a}\``).join(", ") : "(none)"}`);
-        const envKeys = server.env ? Object.keys(server.env) : [];
-        lines.push(`- Env vars: ${envKeys.length > 0 ? envKeys.join(", ") : "(none)"}`);
-      }
-      if (server.version) {
-        lines.push(`- Version: ${server.version}`);
-      }
-      lines.push(
-        `- Status: ${server.connected ? "connected" : "disconnected"}`,
-        `- Tools (${server.toolCount}):`,
-      );
-      if (server.tools.length > 0) {
-        for (const t of server.tools) {
-          lines.push(`  - ${t.tool_name}: ${t.description}`);
-        }
-      } else {
-        lines.push("  (no tools indexed)");
-      }
+      const lines = servers.map((s) => {
+        // Key names only — values are never exposed. Shown so update_mcp_server
+        // callers know which env vars/headers exist and must be preserved.
+        const keys = s.envKeys.length > 0
+          ? ` | env keys: ${s.envKeys.join(", ")}`
+          : s.headerKeys.length > 0
+            ? ` | header keys: ${s.headerKeys.join(", ")}`
+            : "";
+        return `- **${s.name}**: ${s.toolCount} tools | ${s.connected ? "connected" : "disconnected"} | ${s.source}${keys}`;
+      });
       return textResult(
         lines.join("\n") +
-        "\n\nUse search_tools with a tool name above to get its input schema, then call_tools to invoke it.",
+        "\n\nUse list_tools (optionally with server_names) to browse tools, then describe_tools → call_tools."
       );
     }
 
